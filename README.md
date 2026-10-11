@@ -8,7 +8,9 @@ PatchCore (откриване на аномалии, обучен само на 
 rule + PatchCore anomaly detection → OK/NG → Arduino-driven stepper arm strikes rejected parts.
 Write-up in Bulgarian; design spec and findings in English.*
 
-![NG: пръчица върху детайла, топлинната карта я очертава](docs/images/demo/01_ng_stick.jpg)
+**▶ [Видео на клетката в действие (YouTube)](https://youtube.com/shorts/m8cPQQS8TpA)**
+
+[![NG: пръчица върху детайла, топлинната карта я очертава. Натисни за видеото](docs/images/demo/01_ng_stick.jpg)](https://youtube.com/shorts/m8cPQQS8TpA)
 
 ## Документация
 
