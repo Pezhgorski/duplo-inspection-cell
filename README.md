@@ -1,0 +1,58 @@
+# Duplo Inspection Cell
+
+Инспекционна клетка с машинно зрение и AI: 3D камера (Intel RealSense D435) намира детайл,
+PatchCore (откриване на аномалии, обучен само на годни детайли) решава OK/NG, а стъпков двигател
+с рамо удря негодните.
+
+*A small machine-vision inspection cell: RealSense D435 → part localisation and alignment → size
+rule + PatchCore anomaly detection → OK/NG → Arduino-driven stepper arm strikes rejected parts.
+Write-up in Bulgarian; design spec and findings in English.*
+
+![NG: пръчица върху детайла, топлинната карта я очертава](docs/images/demo/01_ng_stick.jpg)
+
+## Документация
+
+- **[Демо и резултати (BG)](docs/demo_bg.md):** какво показва, как работи, резултати без
+  разкрасяване, проблеми и решения.
+- [Design spec (EN)](docs/superpowers/specs/2026-10-11-duplo-inspection-design.md): архитектура,
+  Modbus RTU карта на регистрите, машина на състоянията, самодиагностика.
+- [Spike findings (EN)](docs/findings/2026-10-11-anomaly-spike.md): първата проба и какво промени.
+
+## Структура
+
+| Папка | Съдържание |
+|---|---|
+| `cell/` | намиране и изправяне на детайла (`geometry.py`), правило за размер (`rules.py`), PatchCore инференция (`anomaly.py`) |
+| `tools/capture.py` | заснемане на набор данни: заключване на експозиция/баланс на бялото, зона за инспекция (`-`/`+`, стрелки) |
+| `tools/inspect_test.py` | инспекция на живо: `R` реално време, `SPACE` единична снимка, `K` удар с рамото |
+| `tools/camera_check.py` | проверка на камерата: USB връзка, цвят + дълбочина |
+| `train/train_model.py` | обучение, избор на праг върху валидационен набор, `models/meta.json` |
+| `train/result_images.py` | изображенията с резултати в `docs/images` |
+| `firmware/motor_test/` | Arduino Mega: стъпков двигател през TB6600-тип драйвер, команди по USB serial |
+| `spike/` | първата (еднократна) проба, запазена за справка |
+
+## Стартиране
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\pip install -r requirements.txt
+```
+
+```bash
+.venv\Scripts\python tools\capture.py --session session1     # SPACE = годен, D = дефект
+.venv\Scripts\python train\train_model.py --session session1
+.venv\Scripts\python tools\inspect_test.py --port COM4
+```
+
+Снимките (`data/`) и обученият модел (`models/`) не са в хранилището заради размера. Моделът
+се обучава наново за около 5 s.
+
+Фърмуер: `arduino-cli compile --fqbn arduino:avr:mega firmware/motor_test` и
+`arduino-cli upload -p COM4 --fqbn arduino:avr:mega firmware/motor_test`
+(библиотека: AccelStepper). Свързване: PUL+ → D2, DIR+ → D3, PUL− и DIR− → GND.
+
+## Хардуер
+
+Intel RealSense D435 · лаптоп с NVIDIA RTX 3080 · Arduino Mega 2560 · TB6600-тип драйвер
+(1/16 стъпка, 1.0 A) · NEMA 17 · рамо от дървени пръчици.

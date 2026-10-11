@@ -1,0 +1,13 @@
+# Python 3.12. Install PyTorch with CUDA first:
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+anomalib==2.7.0
+lightning==2.6.6
+numpy==2.5.4
+opencv-python==5.0.0.93
+pyrealsense2==2.59.1.11053
+pyserial==3.5
+pymodbus==3.16.1
+pytest==9.1.1
+# anomalib pulls in opencv-python-headless, which overwrites OpenCV's GUI support.
+# If windows fail to open ("The function is not implemented"), run:
+#   pip install --force-reinstall --no-deps opencv-python==5.0.0.93

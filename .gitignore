@@ -1,0 +1,16 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+install_log.txt
+
+# captured photos and trained models: too large for git (retrain with train/train_model.py)
+data/
+models/
+# first camera test, contains a photo of the developer
+captures/
+
+# spike outputs (the images that matter are copied into docs/images)
+spike/crops/
+spike/results/
+spike/*.jpg
