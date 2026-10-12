@@ -390,3 +390,67 @@ def test_not_home_after_another_fault_is_still_confirm_home_only(master, slave, 
     run(master, clock, 0.1)
     assert slave.resets == 1
     assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def wait_until(cond, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+def test_not_ready_without_a_recent_status(master, clock):
+    assert master.ready
+    clock.advance(1.0)  # no step() ran: e.g. the actuator thread is stuck
+    assert not master.ready
+    assert master.request_reject() is None
+
+
+def test_thread_survives_a_bug_in_step_and_reports_it():
+    slave = FakeSlave(time.monotonic)
+    slave.strike_time = 1.0
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    try:
+        assert wait_until(lambda: actuator.master.ready)
+        job = actuator.request_reject()
+
+        def broken():
+            raise KeyError("unexpected response")
+
+        slave.read_status = broken
+        assert wait_until(lambda: job.state != "pending")
+        assert job.state == "failed" and "ACTUATOR_INTERNAL" in job.error
+        assert actuator.master.phase is Phase.FAULT
+        assert "ACTUATOR_INTERNAL" in actuator.describe()
+        assert actuator._thread.is_alive()
+    finally:
+        actuator.stop()
+
+
+def test_reset_clears_an_internal_error_even_after_not_home(master, slave, clock):
+    slave.trip(3)  # NOT_HOME latched earlier
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    slave.fault, slave.fault_code = False, 0  # the operator has since dealt with the arm
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")
+    master.reset()  # X must work: this is no longer a NOT_HOME latch
+    run(master, clock, 0.2)
+    assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def test_slave_comm_lost_after_a_master_stall_recovers_by_itself(master, slave, clock):
+    slave.trip(1)  # this process stalled > 1 s; the link itself is fine again
+    run(master, clock, 0.2)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
+    assert reject(master, clock).state == "done"
+
+
+def test_slave_comm_lost_mid_cycle_fails_the_job_then_recovers(master, slave, clock):
+    slave.strike_time = 2.0
+    job = master.request_reject()
+    run(master, clock, 0.1)
+    slave.trip(1)
+    run(master, clock, 0.2)
+    assert job.state == "failed" and "COMM_LOST" in job.error
+    assert master.phase is Phase.IDLE

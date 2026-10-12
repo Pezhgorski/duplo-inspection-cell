@@ -215,9 +215,9 @@ def test_master_freeze_mid_strike_stops_the_arm(slave, clock):
     slave.advance(1.0)
     assert slave.position() == stopped  # halted, not still moving
     run(m, clock, 0.2, slave_advance=slave.advance)
-    assert job.state == "failed"
-    assert m.phase is Phase.FAULT and "COMM_LOST" in m.fault
-    m.reset()
+    assert job.state == "failed" and "COMM_LOST" in job.error
+    # the link is fine again: the master resets the watchdog fault itself and the arm drives home
+    assert m.phase is not Phase.FAULT
     assert run(m, clock, 3.0, slave_advance=slave.advance, until=lambda: m.ready)
     assert slave.position() == 0
 

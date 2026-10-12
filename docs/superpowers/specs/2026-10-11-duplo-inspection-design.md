@@ -218,6 +218,9 @@ every 50 ms). Details settled while building it:
   polling every 50 ms keeps that to a slightly slower strike, with exact positions.
 - A full strike at the defaults takes ~1.1-1.3 s on the real stepper (ramps plus the Modbus pauses),
   longer than the 1 s watchdog: a master that dies mid-strike leaves the arm halted part-way.
+- A slave COMM_LOST seen while the link is live again (this process stalled > 1 s) is auto-reset the
+  same way as at connect. A bug inside the master's step() latches ACTUATOR_INTERNAL instead of
+  stopping the thread, and READY needs a status read within the last 500 ms.
 
 **Homing:** no limit switch — the stick's power-on position is home; the firmware counts steps
 and always returns the same number. (A limit switch is a possible later upgrade.)

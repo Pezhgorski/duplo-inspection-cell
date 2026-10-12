@@ -137,7 +137,8 @@ class RejectJob:
         self.error = ""
 
     def _finish(self, error: str = ""):
-        self.state, self.error = ("failed", error) if error else ("done", "")
+        self.error = error  # before state: another thread may read error as soon as state changes
+        self.state = "failed" if error else "done"
 
 
 class ActuatorMaster:
@@ -162,10 +163,13 @@ class ActuatorMaster:
         self._expected_count = 0
         self._reset_requested = False
         self._latched_code = None       # slave fault code behind a latched fault
+        self._status_at = float("-inf")  # when the last status read succeeded
 
     @property
     def ready(self) -> bool:
-        return self.phase is Phase.IDLE and self.job is None and bool(self.status and self.status.ready)
+        fresh = self.clock() - self._status_at <= HEARTBEAT_TIMEOUT
+        return (self.phase is Phase.IDLE and self.job is None and fresh
+                and bool(self.status and self.status.ready))
 
     def request_reject(self) -> RejectJob | None:
         """Start one reject cycle on the next step(); None when the arm cannot take one now."""
@@ -184,6 +188,13 @@ class ActuatorMaster:
         if self.phase is Phase.FAULT and self._latched_code == SLAVE_FAULT_NOT_HOME:
             self._reset_requested = True
 
+    def internal_error(self, reason: str):
+        """A bug in step() (not a bus error): fail the job and latch, so nothing waits on it forever."""
+        self.fault = reason
+        self._latched_code = None  # not a slave fault, so X (not R) clears it, even after a NOT_HOME
+        self._fail_job(reason)
+        self._enter(Phase.FAULT, self.clock())
+
     def step(self):
         now = self.clock()
         try:
@@ -192,6 +203,7 @@ class ActuatorMaster:
                 self.bus.write_registers(HR_MASTER_HEARTBEAT, [self._beat])
                 self._next_beat = now + HEARTBEAT_PERIOD
             status = self.status = self.bus.read_status()
+            self._status_at = now
         except BusError:
             # one lost reply is not a fault: only a heartbeat that stays stale is
             self._check_alive(now)
@@ -230,6 +242,13 @@ class ActuatorMaster:
                 self._reset_requested = False
                 self.fault = ""
                 self._enter(Phase.IDLE, now)
+        elif s.fault and s.fault_code == SLAVE_FAULT_COMM_LOST:
+            # the slave lost our heartbeat (this process stalled > 1 s) but the link is fine again:
+            # recover exactly as a fresh connect does
+            self._fail_job("ACTUATOR_COMM_LOST: the arm lost the master heartbeat")
+            self.fault = "ACTUATOR_COMM_LOST: recovering"
+            self._enter(Phase.CONNECTING, now)
+            self._connect(s, now)
         elif s.fault:
             self._latch_slave(s, now)
         elif self.phase is Phase.IDLE:
@@ -354,4 +373,7 @@ class ActuatorThread:
     def _run(self):
         while not self._stop.wait(self.period):
             with self._lock:
-                self.master.step()
+                try:
+                    self.master.step()
+                except Exception as exc:  # a bug, not a bus error: show it instead of dying silently
+                    self.master.internal_error(f"ACTUATOR_INTERNAL: {type(exc).__name__}: {exc}")
