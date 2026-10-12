@@ -111,7 +111,7 @@ def main() -> int:
     print("loading model...")
     model = AnomalyModel(ROOT / meta["model"])
     plate = load_plate()
-    actuator = None
+    master = actuator = None
     if not args.no_motor:
         steps = -args.strike_steps if args.reverse else args.strike_steps
         try:
@@ -119,13 +119,14 @@ def main() -> int:
         except ValueError as exc:
             parser.error(str(exc))
         master = ActuatorMaster(ModbusBus.serial(args.port), strike_steps=steps, speed=args.speed, accel=args.accel)
-        actuator = ActuatorThread(master).start()
-    trigger, auto_reject = RejectTrigger(), actuator is not None
 
     pipeline, profile = start_pipeline()
     reset_depth_sensor(profile)
     settings = CameraSettings(color_sensor(profile))
     settings.set_auto()
+    if master is not None:  # start the arm's heartbeat only once the camera is up
+        actuator = ActuatorThread(master).start()
+    trigger, auto_reject = RejectTrigger(), actuator is not None
     grab = lambda: np.asanyarray(pipeline.wait_for_frames().get_color_frame().get_data())
     relock_at, frames_seen = AUTO_SETTLE_FRAMES, 0
     result, status = None, "metering camera..."
@@ -199,12 +200,13 @@ def main() -> int:
         pipeline.stop()
         cv2.destroyAllWindows()
         if actuator:
-            actuator.stop()
-            try:
-                actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
-            except BusError:
-                pass
-            actuator.master.bus.close()
+            # let a running strike come home before the port closes and the watchdog would halt it
+            if actuator.stop(drain=actuator.master.done_timeout):
+                try:
+                    actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
+                except BusError:
+                    pass
+                actuator.master.bus.close()
     return 0
 
 

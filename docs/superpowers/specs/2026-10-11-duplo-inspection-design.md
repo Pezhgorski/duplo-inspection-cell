@@ -221,6 +221,8 @@ every 50 ms). Details settled while building it:
 - A slave COMM_LOST seen while the link is live again (this process stalled > 1 s) is auto-reset the
   same way as at connect. A bug inside the master's step() latches ACTUATOR_INTERNAL instead of
   stopping the thread, and READY needs a status read within the last 500 ms.
+- On quit, tools/inspect_test.py stops taking new strikes and waits (up to the DONE timeout) for a
+  running cycle to finish before it closes the port. The arm's thread starts only after the camera.
 
 **Homing:** no limit switch — the stick's power-on position is home; the firmware counts steps
 and always returns the same number. (A limit switch is a possible later upgrade.)

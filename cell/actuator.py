@@ -342,6 +342,7 @@ class ActuatorThread:
         self.master = master
         self.period = period
         self._lock = threading.Lock()
+        self._closing = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="actuator", daemon=True)
 
@@ -349,13 +350,21 @@ class ActuatorThread:
         self._thread.start()
         return self
 
-    def stop(self):
+    def stop(self, drain: float = 0.0) -> bool:
+        """Stop the thread; True once it has ended. drain > 0: first let a running reject cycle
+        finish (up to `drain` s), so the slave's watchdog does not halt the stick halfway out."""
+        with self._lock:
+            self._closing = True
+        deadline = time.monotonic() + drain
+        while self._thread.is_alive() and self.master.job is not None and time.monotonic() < deadline:
+            time.sleep(self.period)
         self._stop.set()
         self._thread.join(timeout=1.0)
+        return not self._thread.is_alive()
 
     def request_reject(self) -> RejectJob | None:
         with self._lock:
-            return self.master.request_reject()
+            return None if self._closing else self.master.request_reject()
 
     def reset(self):
         with self._lock:

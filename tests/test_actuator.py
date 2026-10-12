@@ -454,3 +454,15 @@ def test_slave_comm_lost_mid_cycle_fails_the_job_then_recovers(master, slave, cl
     run(master, clock, 0.2)
     assert job.state == "failed" and "COMM_LOST" in job.error
     assert master.phase is Phase.IDLE
+
+
+def test_stop_lets_a_running_strike_finish():
+    slave = FakeSlave(time.monotonic)
+    slave.strike_time = 0.3
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    assert wait_until(lambda: actuator.master.ready)
+    job = actuator.request_reject()
+    assert actuator.stop(drain=2.0)          # Q pressed right after the strike started
+    assert job.state == "done"
+    assert slave.coils[COIL_REQ_REJECT] is False
+    assert actuator.request_reject() is None  # no new strikes once closing
