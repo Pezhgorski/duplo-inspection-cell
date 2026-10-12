@@ -219,15 +219,19 @@ class ActuatorMaster:
         if self.phase is Phase.CONNECTING:
             self._connect(s, now)
         elif self.phase is Phase.FAULT:
-            if self._reset_requested:
+            if s.fault and s.fault_code == SLAVE_FAULT_NOT_HOME and self._latched_code != SLAVE_FAULT_NOT_HOME:
+                # the arm restarted while we were already faulted (e.g. MOVE_TIMEOUT): X must not
+                # take the stick's position as home, so latch NOT_HOME and drop any queued reset
+                self._reset_requested = False
+                self._latch_slave(s, now)
+            elif self._reset_requested:
                 self.bus.write_coil(COIL_REQ_REJECT, False)
                 self._pulse_reset()
                 self._reset_requested = False
                 self.fault = ""
                 self._enter(Phase.IDLE, now)
         elif s.fault:
-            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now,
-                        s.fault_code)
+            self._latch_slave(s, now)
         elif self.phase is Phase.IDLE:
             if self.job is not None and self.job.state == "pending":
                 if not s.ready:
@@ -276,8 +280,7 @@ class ActuatorMaster:
             self._pulse_reset()
             return
         if s.fault:
-            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now,
-                        s.fault_code)
+            self._latch_slave(s, now)
             return
         self.fault = ""
         self._enter(Phase.IDLE, now)
@@ -287,6 +290,10 @@ class ActuatorMaster:
         # between two requests
         self.bus.write_coil(COIL_RESET_FAULT, True)
         self.bus.write_coil(COIL_RESET_FAULT, False)
+
+    def _latch_slave(self, s: Status, now):
+        self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now,
+                    s.fault_code)
 
     def _latch(self, reason: str, now, slave_code=None):
         self.fault = reason

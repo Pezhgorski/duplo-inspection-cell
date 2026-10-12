@@ -268,3 +268,23 @@ def test_reboot_at_home_is_harmless(slave, clock):
     slave.reboot()
     assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
     assert m.fault == ""  # no R needed: the stick was home
+
+
+def test_reboot_while_already_faulted_still_needs_r(slave, clock):
+    m = connect(slave, clock, speed=400)
+    m.request_reject()
+    run(m, clock, 0.5, slave_advance=slave.advance)
+    slave.set_stalled(1)
+    run(m, clock, 6.0, slave_advance=slave.advance)
+    assert m.phase is Phase.FAULT and "MOVE_TIMEOUT" in m.fault
+    assert slave.position() > 0 and slave.away()
+    slave.reboot()  # the Mega restarts while the master is already faulted
+    run(m, clock, 0.3, slave_advance=slave.advance)
+    assert m.phase is Phase.FAULT and "NOT_HOME" in m.fault
+    m.reset()  # X must not take the stick's position as home
+    run(m, clock, 0.5, slave_advance=slave.advance)
+    assert m.phase is Phase.FAULT and slave.away()
+    slave.set_stalled(0)
+    m.confirm_home()  # R
+    assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
+    assert not slave.away()

@@ -374,3 +374,19 @@ def test_confirm_home_does_not_clear_other_faults(master, slave, clock):
     master.confirm_home()
     run(master, clock, 0.2)
     assert master.phase is Phase.FAULT and slave.resets == 0
+
+
+def test_not_home_after_another_fault_is_still_confirm_home_only(master, slave, clock):
+    slave.trip(2)  # latched as MOVE_TIMEOUT
+    run(master, clock, 0.1)
+    assert "MOVE_TIMEOUT" in master.fault
+    slave.trip(3)  # the arm then restarted while the stick was out
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    master.reset()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
+    master.confirm_home()
+    run(master, clock, 0.1)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
