@@ -155,6 +155,11 @@ def reject(master, slave, clock, seconds=3.0):
     return job
 
 
+def assert_operator_settings(slave, speed=400):
+    assert slave.holding(HR_STRIKE_STEPS) == 0x10000 - 600  # -600 as uint16
+    assert slave.holding(HR_MAX_SPEED) == speed
+
+
 def test_handshake_with_real_firmware_logic(slave, clock):
     m = connect(slave, clock)
     assert slave.holding(HR_STRIKE_STEPS) == 800
@@ -242,10 +247,10 @@ def test_master_and_slave_agree_on_the_stroke_timeout(lib, steps, speed, accel):
 
 
 def test_reboot_away_from_home_is_latched_for_the_operator(slave, clock):
-    m = connect(slave, clock, speed=400)  # 800 steps out take 2 s
+    m = connect(slave, clock, strike_steps=-600, speed=400)  # 600 steps back take 1.5 s
     job = m.request_reject()
     run(m, clock, 0.5, slave_advance=slave.advance)
-    assert slave.position() > 0 and slave.away()
+    assert slave.position() != 0 and slave.away()
     slave.reboot()  # USB brown-out, or pymodbus reopening the port
     run(m, clock, 0.3, slave_advance=slave.advance)
     assert job.state == "failed"
@@ -258,7 +263,9 @@ def test_reboot_away_from_home_is_latched_for_the_operator(slave, clock):
     m.confirm_home()
     assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
     assert not slave.away()
+    assert_operator_settings(slave)
     assert reject(m, slave, clock, seconds=8.0).state == "done", m.fault
+    assert slave.min_position() < 0  # the operator's reverse strike, not the +800 default
 
 
 def test_reboot_at_home_is_harmless(slave, clock):
@@ -271,13 +278,13 @@ def test_reboot_at_home_is_harmless(slave, clock):
 
 
 def test_reboot_while_already_faulted_still_needs_r(slave, clock):
-    m = connect(slave, clock, speed=400)
+    m = connect(slave, clock, strike_steps=-600, speed=400)
     m.request_reject()
     run(m, clock, 0.5, slave_advance=slave.advance)
     slave.set_stalled(1)
     run(m, clock, 6.0, slave_advance=slave.advance)
     assert m.phase is Phase.FAULT and "MOVE_TIMEOUT" in m.fault
-    assert slave.position() > 0 and slave.away()
+    assert slave.position() != 0 and slave.away()
     slave.reboot()  # the Mega restarts while the master is already faulted
     run(m, clock, 0.3, slave_advance=slave.advance)
     assert m.phase is Phase.FAULT and "NOT_HOME" in m.fault
@@ -288,3 +295,15 @@ def test_reboot_while_already_faulted_still_needs_r(slave, clock):
     m.confirm_home()  # R
     assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
     assert not slave.away()
+    assert_operator_settings(slave)  # the reboot reset them to the firmware defaults; R re-sent them
+    assert reject(m, slave, clock, seconds=8.0).state == "done", m.fault
+    assert slave.min_position() < 0 and slave.max_position() == 0
+
+
+def test_every_strike_carries_the_masters_settings(slave, clock):
+    m = connect(slave, clock, strike_steps=-600, speed=1200)
+    for address, default in ((HR_STRIKE_STEPS, 800), (HR_MAX_SPEED, 2400), (HR_ACCELERATION, 12000)):
+        slave.set_holding(address, default)  # an unnoticed reboot put the defaults back
+    assert reject(m, slave, clock).state == "done", m.fault
+    assert slave.min_position() == -600 and slave.max_position() == 0
+    assert_operator_settings(slave, speed=1200)

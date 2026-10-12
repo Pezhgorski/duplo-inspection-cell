@@ -178,15 +178,21 @@ class ActuatorMaster:
         self.job = RejectJob()
         return self.job
 
-    def reset(self):
-        """Operator reset of a latched fault (X). NOT_HOME needs confirm_home() (R) instead."""
+    def reset(self) -> bool:
+        """Operator reset of a latched fault (X). NOT_HOME needs confirm_home() (R) instead.
+        True when a reset was queued."""
         if self.phase is Phase.FAULT and self._latched_code != SLAVE_FAULT_NOT_HOME:
             self._reset_requested = True
+            return True
+        return False
 
-    def confirm_home(self):
-        """Operator (R): the stick is back home by hand, after the arm restarted mid-strike."""
+    def confirm_home(self) -> bool:
+        """Operator (R): the stick is back home by hand, after the arm restarted mid-strike.
+        True when a reset was queued."""
         if self.phase is Phase.FAULT and self._latched_code == SLAVE_FAULT_NOT_HOME:
             self._reset_requested = True
+            return True
+        return False
 
     def internal_error(self, reason: str):
         """A bug in step() (not a bus error): fail the job and latch, so nothing waits on it forever."""
@@ -194,6 +200,10 @@ class ActuatorMaster:
         self._latched_code = None  # not a slave fault, so X (not R) clears it, even after a NOT_HOME
         self._fail_job(reason)
         self._enter(Phase.FAULT, self.clock())
+        try:
+            self.bus.write_coil(COIL_REQ_REJECT, False)  # best effort: do not leave a request standing
+        except Exception:
+            pass
 
     def step(self):
         now = self.clock()
@@ -238,6 +248,9 @@ class ActuatorMaster:
                 self._latch_slave(s, now)
             elif self._reset_requested:
                 self.bus.write_coil(COIL_REQ_REJECT, False)
+                # the arm may have rebooted while we were faulted: give RETURNING (and the next
+                # strike) the operator's settings, not the firmware defaults
+                self.bus.write_registers(HR_STRIKE_STEPS, self.config)
                 self._pulse_reset()
                 self._reset_requested = False
                 self.fault = ""
@@ -258,6 +271,10 @@ class ActuatorMaster:
                     return
                 self._expected_count = (s.cycle_count + 1) & 0xFFFF
                 self._request_at = now
+                # an unnoticed reboot would leave the firmware defaults in place: re-send the
+                # settings before every strike (~5 ms). A failed write leaves the job pending and
+                # IDLE, and the next step() retries.
+                self.bus.write_registers(HR_STRIKE_STEPS, self.config)
                 # enter the wait first: if the write lands but its reply is lost, the cycle
                 # still runs, and WAIT_BUSY repeats the (level) request until the slave answers
                 self._enter(Phase.WAIT_BUSY, now)
@@ -366,13 +383,13 @@ class ActuatorThread:
         with self._lock:
             return None if self._closing else self.master.request_reject()
 
-    def reset(self):
+    def reset(self) -> bool:
         with self._lock:
-            self.master.reset()
+            return self.master.reset()
 
-    def confirm_home(self):
+    def confirm_home(self) -> bool:
         with self._lock:
-            self.master.confirm_home()
+            return self.master.confirm_home()
 
     def describe(self) -> str:
         m = self.master

@@ -466,3 +466,74 @@ def test_stop_lets_a_running_strike_finish():
     assert job.state == "done"
     assert slave.coils[COIL_REQ_REJECT] is False
     assert actuator.request_reject() is None  # no new strikes once closing
+
+
+def test_reset_and_confirm_home_report_whether_a_reset_was_queued(master, slave, clock):
+    assert master.reset() is False and master.confirm_home() is False  # nothing to reset
+    slave.trip(2)
+    run(master, clock, 0.1)
+    assert master.confirm_home() is False  # R only confirms home after NOT_HOME
+    assert master.reset() is True
+    run(master, clock, 0.1)
+    assert master.phase is Phase.IDLE
+    slave.trip(3)
+    run(master, clock, 0.1)
+    assert master.reset() is False  # X does not clear NOT_HOME
+    assert master.confirm_home() is True
+    run(master, clock, 0.1)
+    assert master.phase is Phase.IDLE and slave.resets == 2
+
+
+def test_thread_passes_the_reset_result_through():
+    slave = FakeSlave(time.monotonic)
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    try:
+        assert wait_until(lambda: actuator.master.ready)
+        assert actuator.reset() is False and actuator.confirm_home() is False
+        slave.trip(2)
+        assert wait_until(lambda: actuator.master.phase is Phase.FAULT)
+        assert actuator.confirm_home() is False
+        assert actuator.reset() is True
+    finally:
+        actuator.stop()
+
+
+def test_internal_error_drops_the_request_coil(master, slave, clock):
+    slave.strike_time = 2.0
+    master.request_reject()
+    run(master, clock, 0.1)
+    assert slave.coils[COIL_REQ_REJECT] is True
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")
+    assert slave.coils[COIL_REQ_REJECT] is False
+
+
+def test_internal_error_survives_a_dead_bus(master, slave, clock):
+    slave.offline = True
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")  # the best-effort coil write must not raise
+    assert master.phase is Phase.FAULT
+
+
+def test_x_after_an_internal_error_does_not_clear_a_live_not_home(master, slave, clock):
+    slave.trip(3)  # the arm restarted mid-strike and still reports NOT_HOME
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    master.internal_error("ACTUATOR_INTERNAL: x")
+    master.reset()  # allowed to queue (this is no longer a NOT_HOME latch) ...
+    run(master, clock, 0.3)
+    assert master.phase is Phase.FAULT and "NOT_HOME" in master.fault  # ... but the live fault wins
+    assert slave.resets == 0
+
+
+def test_not_home_found_at_connect_needs_confirm_home(clock):
+    slave = FakeSlave(clock)
+    slave.trip(3)  # the Mega restarted away from home before this master connected
+    m = ActuatorMaster(slave, clock=clock)
+    run(m, clock, 0.3)
+    assert m.phase is Phase.FAULT and "NOT_HOME" in m.fault
+    assert m.reset() is False
+    run(m, clock, 0.2)
+    assert m.phase is Phase.FAULT and slave.resets == 0
+    assert m.confirm_home() is True
+    run(m, clock, 0.2)
+    assert slave.resets == 1
+    assert m.phase is Phase.IDLE and m.fault == ""
