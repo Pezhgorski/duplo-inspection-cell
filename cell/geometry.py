@@ -27,7 +27,8 @@ class Part:
 
 @dataclass(frozen=True)
 class Search:
-    status: str                  # "found", "empty", "outside" (touches the box edge), "multiple"
+    status: str                  # "found", "empty", "outside" (touches the box edge), "multiple",
+                                 # "too_large" (bigger than any part: a hand or the arm)
     part: Part | None = None
 
 
@@ -58,20 +59,23 @@ def find_part(bgr: np.ndarray, plate: dict) -> Search:
     bh, bw = box.shape[:2]
     # CCOMP, not EXTERNAL: a blob can sit inside another blob's hole and EXTERNAL would drop it
     contours, hierarchy = cv2.findContours(part_mask(box), cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    inside, touching = [], False
+    inside, touching, too_large = [], False, False
     for contour, (_, _, _, parent) in zip(contours, hierarchy[0] if hierarchy is not None else []):
         area = cv2.contourArea(contour)
         if parent != -1 or area < MIN_AREA:
             continue
         x, y, cw, ch = cv2.boundingRect(contour)
-        if x <= 1 or y <= 1 or x + cw >= bw - 1 or y + ch >= bh - 1 or area > MAX_AREA:
+        if area > MAX_AREA:
+            too_large = True
+        elif x <= 1 or y <= 1 or x + cw >= bw - 1 or y + ch >= bh - 1:
             touching = True
         else:
             inside.append(contour)
     # blobs touching the box edge are either a part sticking out or background creeping in at the
-    # edge (e.g. the tubs after a nudge); they only matter when there is no complete part inside
+    # edge (e.g. the tubs after a nudge); like oversized blobs, they only matter when there is no
+    # complete part inside
     if not inside:
-        return Search("outside" if touching else "empty")
+        return Search("too_large" if too_large else "outside" if touching else "empty")
     if len(inside) > 1:
         return Search("multiple")
     (cx, cy), (rw, rh), angle = cv2.minAreaRect(inside[0])
