@@ -4,9 +4,10 @@
 2. The Python master against the real slave logic, loaded with ctypes: proves both ends
    agree on the register map and the handshake.
 
-Needs a C++ compiler (g++ or clang++); skipped without one.
+Needs a C++ compiler: g++ / clang++ on PATH, or Visual Studio C++ build tools (found with vswhere); skipped without one.
 """
 import ctypes
+import os
 import shutil
 import subprocess
 import sys
@@ -22,20 +23,49 @@ from sim import SimClock, run
 ROOT = Path(__file__).resolve().parent.parent
 FIRMWARE = ROOT / "firmware" / "reject_cell" / "RejectController.cpp"
 TESTS = ROOT / "tests" / "firmware"
-CXX = shutil.which("g++") or shutil.which("clang++") or shutil.which("c++")
 
-pytestmark = pytest.mark.skipif(CXX is None, reason="no C++ compiler (g++ / clang++) on PATH")
+
+def find_compiler():
+    """("gcc", path) for g++ / clang++ on PATH, ("msvc", vcvars64.bat) for Visual Studio, or None."""
+    for name in ("g++", "clang++", "c++"):
+        if shutil.which(name):
+            return "gcc", shutil.which(name)
+    if sys.platform != "win32":
+        return None
+    vswhere = (Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+               / "Microsoft Visual Studio" / "Installer" / "vswhere.exe")
+    if not vswhere.exists():
+        return None
+    found = subprocess.run([str(vswhere), "-products", "*", "-latest", "-requires",
+                            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property",
+                            "installationPath"], capture_output=True, text=True).stdout.strip()
+    vcvars = Path(found) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat" if found else None
+    return ("msvc", str(vcvars)) if vcvars and vcvars.exists() else None
+
+
+COMPILER = find_compiler()
+
+pytestmark = pytest.mark.skipif(
+    COMPILER is None, reason="no C++ compiler: g++ / clang++ on PATH or Visual Studio C++ build tools")
 
 # RejectController::State
 IDLE, FAULTED = 1, 6
 
 
 def compile_cpp(sources, out: Path, shared=False):
-    cmd = [CXX, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-o", str(out), *map(str, sources)]
-    if shared:
-        cmd[1:1] = ["-shared"] + ([] if sys.platform == "win32" else ["-fPIC"])
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    kind, tool = COMPILER
+    if kind == "gcc":
+        cmd = [tool, "-std=c++11", "-Wall", "-Wextra", "-Werror", "-o", str(out), *map(str, sources)]
+        if shared:
+            cmd[1:1] = ["-shared"] + ([] if sys.platform == "win32" else ["-fPIC"])
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    else:
+        # vcvars64.bat puts cl and its headers/libs on PATH for this one command; objects land in cwd
+        cl = ["cl", "/nologo", "/std:c++14", "/W4", "/WX", "/EHsc", *(["/LD"] if shared else []),
+              f"/Fe{out}", *map(str, sources)]
+        result = subprocess.run(f'call "{tool}" >nul 2>nul && {subprocess.list2cmdline(cl)}',
+                                shell=True, cwd=out.parent, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr  # cl reports errors on stdout
 
 
 def test_controller_unit_tests(tmp_path):

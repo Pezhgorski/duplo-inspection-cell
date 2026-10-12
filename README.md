@@ -32,7 +32,7 @@ Write-up in Bulgarian; design spec and findings in English.*
 | `train/result_images.py` | изображенията с резултати в `docs/images` |
 | `firmware/reject_cell/` | Arduino Mega като Modbus RTU slave: неблокиращ удар, heartbeat, watchdog, грешки (`RejectController` е без Arduino зависимости и се тества на PC) |
 | `firmware/motor_test/` | първоначален тест на двигателя: текстови команди по USB serial |
-| `tests/` | `pytest`: master срещу симулиран slave, slave логиката (C++, компилира се с g++/clang++), master срещу истинската slave логика, Modbus кадри на ниво байтове |
+| `tests/` | `pytest`: master срещу симулиран slave, slave логиката (C++, компилира се с g++/clang++ или MSVC), master срещу истинската slave логика, Modbus кадри на ниво байтове |
 | `spike/` | първата (еднократна) проба, запазена за справка |
 
 ## Стартиране
@@ -57,7 +57,7 @@ python -m venv .venv
 (библиотеки: `arduino-cli lib install AccelStepper ModbusRTUSlave`). Свързване: PUL+ → D2,
 DIR+ → D3, PUL− и DIR− → GND.
 
-Тестове (без камера и Arduino; C++ частта се пропуска, ако няма g++/clang++):
+Тестове (без камера и Arduino; C++ частта се компилира с g++/clang++ или с MSVC от Visual Studio Build Tools, който се намира автоматично; пропуска се само ако няма компилатор):
 
 ```bash
 .venv\Scripts\python -m pytest
