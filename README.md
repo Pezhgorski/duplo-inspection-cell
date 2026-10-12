@@ -24,13 +24,15 @@ Write-up in Bulgarian; design spec and findings in English.*
 
 | Папка | Съдържание |
 |---|---|
-| `cell/` | намиране и изправяне на детайла (`geometry.py`), правило за размер (`rules.py`), PatchCore инференция (`anomaly.py`) |
+| `cell/` | намиране и изправяне на детайла (`geometry.py`), правило за размер (`rules.py`), PatchCore инференция (`anomaly.py`), Modbus RTU master с handshake и watchdog (`actuator.py`), кога да се удари и проверка с камерата, че ударът е успял (`reject.py`) |
 | `tools/capture.py` | заснемане на набор данни: заключване на експозиция/баланс на бялото, зона за инспекция (`-`/`+`, стрелки) |
-| `tools/inspect_test.py` | инспекция на живо: `R` реално време, `SPACE` единична снимка, `K` удар с рамото |
+| `tools/inspect_test.py` | инспекция на живо: `R` реално време, `A` автоматичен удар на NG, `SPACE` единична снимка, `K` ръчен удар, `X` нулиране на грешка |
 | `tools/camera_check.py` | проверка на камерата: USB връзка, цвят + дълбочина |
 | `train/train_model.py` | обучение, избор на праг върху валидационен набор, `models/meta.json` |
 | `train/result_images.py` | изображенията с резултати в `docs/images` |
-| `firmware/motor_test/` | Arduino Mega: стъпков двигател през TB6600-тип драйвер, команди по USB serial |
+| `firmware/reject_cell/` | Arduino Mega като Modbus RTU slave: неблокиращ удар, heartbeat, watchdog, грешки (`RejectController` е без Arduino зависимости и се тества на PC) |
+| `firmware/motor_test/` | първоначален тест на двигателя: текстови команди по USB serial |
+| `tests/` | `pytest`: master срещу симулиран slave, slave логиката (C++, компилира се с g++/clang++), master срещу истинската slave логика, Modbus кадри на ниво байтове |
 | `spike/` | първата (еднократна) проба, запазена за справка |
 
 ## Стартиране
@@ -50,9 +52,16 @@ python -m venv .venv
 Снимките (`data/`) и обученият модел (`models/`) не са в хранилището заради размера. Моделът
 се обучава наново за около 5 s.
 
-Фърмуер: `arduino-cli compile --fqbn arduino:avr:mega firmware/motor_test` и
-`arduino-cli upload -p COM4 --fqbn arduino:avr:mega firmware/motor_test`
-(библиотека: AccelStepper). Свързване: PUL+ → D2, DIR+ → D3, PUL− и DIR− → GND.
+Фърмуер: `arduino-cli compile --fqbn arduino:avr:mega firmware/reject_cell` и
+`arduino-cli upload -p COM4 --fqbn arduino:avr:mega firmware/reject_cell`
+(библиотеки: `arduino-cli lib install AccelStepper ModbusRTUSlave`). Свързване: PUL+ → D2,
+DIR+ → D3, PUL− и DIR− → GND.
+
+Тестове (без камера и Arduino; C++ частта се пропуска, ако няма g++/clang++):
+
+```bash
+.venv\Scripts\python -m pytest
+```
 
 ## Хардуер
 

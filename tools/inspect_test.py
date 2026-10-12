@@ -1,16 +1,20 @@
-"""Live inspection test: SPACE inspects the brick on the plate, K strikes it with the arm.
+"""Live inspection test: inspects the brick on the plate and strikes NG parts with the arm.
 
 Usage:  python tools/inspect_test.py [--port COM4] [--strike-steps 800] [--reverse] [--no-motor]
 
 Keys:
   R      real-time mode on/off: inspect every frame (starts on)
+  A      auto-reject on/off: in real-time mode a settled NG part is struck once, then the
+         camera verifies it moved (starts on when the arm is connected)
   SPACE  inspect once and freeze the result (turns real-time off)
-  K      strike: arm moves --strike-steps forward and back to rest
+  K      strike now (manual), through the same Modbus handshake
+  X      reset an arm fault
   L      re-lock camera exposure / white balance
   Q/ESC  quit
 
-Needs models/meta.json from train/train_model.py, and the motor_test firmware on the Arduino.
-The driver is set to 3200 steps per turn (1/16): 800 steps = a quarter turn.
+Needs models/meta.json from train/train_model.py, and the reject_cell firmware on the Arduino
+(Modbus RTU slave, see cell/actuator.py). The driver is set to 3200 steps per turn (1/16):
+800 steps = a quarter turn.
 """
 import argparse
 import json
@@ -20,8 +24,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pyrealsense2 as rs
-import serial
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -29,8 +31,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from capture import (AUTO_SETTLE_FRAMES, CameraSettings, color_sensor,  # noqa: E402
                      reset_depth_sensor, start_pipeline)
+from cell.actuator import COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus  # noqa: E402
 from cell.anomaly import AnomalyModel, roi_score  # noqa: E402
 from cell.geometry import aligned_crop, find_part, load_plate, part_box, plate_pixels  # noqa: E402
+from cell.reject import RejectTrigger  # noqa: E402
 from cell.rules import check_size  # noqa: E402
 
 WINDOW = "inspect test"
@@ -43,40 +47,11 @@ SEARCH_MESSAGES = {
 }
 
 
-class Motor:
-    """Talks to the motor_test firmware: 'f<N>' / 'b<N>' move N steps and reply 'done ...'."""
-
-    def __init__(self, port: str, speed: int, accel: int):
-        self.serial = serial.Serial(port, 115200, timeout=0.1)
-        time.sleep(2.5)  # opening the port resets the Mega
-        self.serial.reset_input_buffer()
-        self.command(f"v{speed}")
-        self.command(f"a{accel}")
-
-    def command(self, text: str, timeout: float = 5.0) -> str:
-        self.serial.write((text + "\n").encode())
-        reply, deadline = "", time.time() + timeout
-        while time.time() < deadline:
-            reply += self.serial.read(64).decode(errors="replace")
-            if "\n" in reply:
-                return reply.strip()
-        raise TimeoutError(f"no reply to {text!r} within {timeout}s")
-
-    def strike(self, steps: int, reverse: bool) -> float:
-        out, back = ("b", "f") if reverse else ("f", "b")
-        start = time.time()
-        self.command(f"{out}{steps}")
-        self.command(f"{back}{steps}")
-        return time.time() - start
-
-    def close(self):
-        self.serial.close()
-
-
 def inspect(frame, plate, model, meta) -> dict:
     search = find_part(frame, plate)
     if search.status != "found":
-        return {"verdict": "NO INSPECTION", "color": YELLOW, "lines": [SEARCH_MESSAGES[search.status]]}
+        return {"verdict": "NO INSPECTION", "color": YELLOW, "status": search.status,
+                "lines": [SEARCH_MESSAGES[search.status]]}
     part = search.part
     crop = aligned_crop(frame, part)
     start = time.time()
@@ -89,7 +64,7 @@ def inspect(frame, plate, model, meta) -> dict:
     ok = not reasons
     return {
         "verdict": "OK" if ok else "NG", "color": GREEN if ok else RED, "crop": crop, "heat": heat,
-        "box": part_box(part), "part": part,
+        "box": part_box(part), "part": part, "status": search.status,
         "lines": [", ".join(reasons) if reasons else "all checks passed",
                   f"anomaly score {score:.3f}  (threshold {meta['threshold']:.3f})",
                   f"size {part.length:.0f} x {part.width:.0f} px",
@@ -133,7 +108,12 @@ def main() -> int:
     print("loading model...")
     model = AnomalyModel(ROOT / meta["model"])
     plate = load_plate()
-    motor = None if args.no_motor else Motor(args.port, args.speed, args.accel)
+    actuator = None
+    if not args.no_motor:
+        steps = -args.strike_steps if args.reverse else args.strike_steps
+        master = ActuatorMaster(ModbusBus.serial(args.port), strike_steps=steps, speed=args.speed, accel=args.accel)
+        actuator = ActuatorThread(master).start()
+    trigger, auto_reject = RejectTrigger(), actuator is not None
 
     pipeline, profile = start_pipeline()
     reset_depth_sensor(profile)
@@ -155,6 +135,8 @@ def main() -> int:
                 continue
             if realtime and relock_at is None:
                 result = inspect(frame, plate, model, meta)
+                if auto_reject:
+                    trigger.update(result["status"], result["verdict"], result.get("part"), actuator)
             now = time.time()
             fps = 0.9 * fps + 0.1 / max(now - last_tick, 1e-3)  # smoothed loop rate
             last_tick = now
@@ -168,8 +150,15 @@ def main() -> int:
                 cv2.polylines(view, [corners.astype(np.int32)], True, result["color"], 2)
             mode = f"REAL-TIME {fps:.0f} fps" if realtime else "SNAPSHOT"
             cv2.putText(view, f"{mode} | {status}", (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2, cv2.LINE_AA)
-            cv2.putText(view, "R real-time | SPACE snapshot | K strike | L re-lock | Q quit", (12, 700),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
+            arm_lines = ["arm: disabled (--no-motor)"] if actuator is None else [
+                actuator.describe(),
+                f"auto-reject {'ON' if auto_reject else 'OFF'}" + (f" | {trigger.message}" if trigger.message else "")]
+            for i, line in enumerate(arm_lines):
+                bad = actuator is not None and i == 0 and actuator.master.fault
+                cv2.putText(view, line, (12, 60 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            RED if bad else WHITE, 2 if bad else 1, cv2.LINE_AA)
+            cv2.putText(view, "R real-time | A auto | SPACE snapshot | K strike | X reset | L re-lock | Q quit",
+                        (12, 700), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
             cv2.imshow(WINDOW, np.hstack([view, result_panel(result)]))
 
             key = cv2.waitKey(1) & 0xFF
@@ -181,22 +170,30 @@ def main() -> int:
                 realtime = False
                 result = inspect(frame, plate, model, meta)
                 status = f"inspected: {result['verdict']}"
+            elif key == ord("a") and actuator is not None:
+                auto_reject = not auto_reject
+                trigger = RejectTrigger()
             elif key == ord("k"):
-                if motor is None:
+                if actuator is None:
                     status = "motor disabled (--no-motor)"
                 else:
-                    try:
-                        status = f"strike done in {motor.strike(args.strike_steps, args.reverse):.2f}s"
-                    except (TimeoutError, serial.SerialException) as exc:
-                        status = f"MOTOR FAULT: {exc}"
+                    status = "strike requested" if actuator.request_reject() else "arm not ready"
+            elif key == ord("x") and actuator is not None:
+                actuator.reset()
+                status = "arm reset requested"
             elif key == ord("l"):
                 settings.set_auto()
                 relock_at, status = frames_seen + AUTO_SETTLE_FRAMES, "re-metering camera..."
     finally:
         pipeline.stop()
         cv2.destroyAllWindows()
-        if motor:
-            motor.close()
+        if actuator:
+            actuator.stop()
+            try:
+                actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
+            except BusError:
+                pass
+            actuator.master.bus.close()
     return 0
 
 

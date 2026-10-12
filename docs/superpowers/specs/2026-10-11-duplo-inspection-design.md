@@ -183,6 +183,9 @@ plain USB serial, no RS-485 hardware needed).
 | Discrete input | 2 | DONE | slave → master | sweep finished, stick back home |
 | Discrete input | 3 | FAULT | slave → master | see FAULT_CODE |
 | Holding reg | 0 | MASTER_HEARTBEAT | master → slave | incremented every 100 ms |
+| Holding reg | 1 | STRIKE_STEPS | master → slave | signed; negative strikes the other way (default 800) |
+| Holding reg | 2 | MAX_SPEED | master → slave | steps/s (default 2400) |
+| Holding reg | 3 | ACCELERATION | master → slave | steps/s² (default 12000) |
 | Input reg | 0 | SLAVE_HEARTBEAT | slave → master | incremented every 100 ms |
 | Input reg | 1 | FAULT_CODE | slave → master | 0 none, 1 comm lost, 2 move timeout |
 | Input reg | 2 | CYCLE_COUNT | slave → master | completed rejects |
@@ -192,6 +195,22 @@ sweeps, returns, clears BUSY, sets DONE → master clears REQ_REJECT → slave c
 
 **Timeouts (master):** BUSY within 300 ms of REQ, DONE within 3 s, slave heartbeat change within
 500 ms. **Watchdog (slave):** master heartbeat unchanged for 1 s → stop motor, FAULT_CODE=1.
+
+**Implementation:** `firmware/reject_cell` (slave; logic in `RejectController`, no Arduino
+dependencies) and `cell/actuator.py` (master, non-blocking `step()` run by a background thread
+every 50 ms). Details settled while building it:
+- Requests are edge-armed: REQ_REJECT must be seen low before a cycle can start, so a held or
+  stale request (e.g. raised during a fault) never strikes twice. RESET_FAULT acts on its rising edge.
+- After a reset the slave drives the arm home first (READY only once home).
+- On connect the master clears REQ_REJECT, writes the strike parameters and auto-resets a
+  COMM_LOST fault (the expected leftover of a previous master session), retrying until the slave
+  has seen the new heartbeat. Any other slave fault is latched for the operator.
+- BUSY may be missed when a strike finishes between two polls; DONE is accepted in its place.
+  CYCLE_COUNT must rise by exactly one per handshake (ACTUATOR_COUNT_MISMATCH otherwise).
+- ModbusRTUSlave holds the Mega's loop for ~4-5 ms per request, during which no steps are taken;
+  polling every 50 ms keeps that to a slightly slower strike, with exact positions.
+- A full-speed strike (~0.7 s) is shorter than the 1 s watchdog, so a master crash mid-strike
+  usually lets the strike finish; the watchdog guards slower moves and an idle arm.
 
 **Homing:** no limit switch — the stick's power-on position is home; the firmware counts steps
 and always returns the same number. (A limit switch is a possible later upgrade.)
