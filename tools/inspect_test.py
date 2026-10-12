@@ -52,7 +52,7 @@ def inspect(frame, plate, model, meta) -> dict:
     search = find_part(frame, plate)
     if search.status != "found":
         return {"verdict": "NO INSPECTION", "color": YELLOW, "status": search.status,
-                "lines": [SEARCH_MESSAGES[search.status]]}
+                "crowded": search.crowded, "lines": [SEARCH_MESSAGES[search.status]]}
     part = search.part
     crop = aligned_crop(frame, part)
     start = time.time()
@@ -65,7 +65,7 @@ def inspect(frame, plate, model, meta) -> dict:
     ok = not reasons
     return {
         "verdict": "OK" if ok else "NG", "color": GREEN if ok else RED, "crop": crop, "heat": heat,
-        "box": part_box(part), "part": part, "status": search.status,
+        "box": part_box(part), "part": part, "status": search.status, "crowded": search.crowded,
         "lines": [", ".join(reasons) if reasons else "all checks passed",
                   f"anomaly score {score:.3f}  (threshold {meta['threshold']:.3f})",
                   f"size {part.length:.0f} x {part.width:.0f} px",
@@ -137,7 +137,8 @@ def main() -> int:
             if realtime and relock_at is None:
                 result = inspect(frame, plate, model, meta)
                 if auto_reject:
-                    trigger.update(result["status"], result["verdict"], result.get("part"), actuator)
+                    trigger.update(result["status"], result["verdict"], result.get("part"), actuator,
+                                   crowded=result["crowded"])
             now = time.time()
             fps = 0.9 * fps + 0.1 / max(now - last_tick, 1e-3)  # smoothed loop rate
             last_tick = now

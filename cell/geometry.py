@@ -30,6 +30,7 @@ class Search:
     status: str                  # "found", "empty", "outside" (touches the box edge), "multiple",
                                  # "too_large" (bigger than any part: a hand or the arm)
     part: Part | None = None
+    crowded: bool = False        # a too-large blob (a hand?) is in the box besides the found part
 
 
 def load_plate(path=PLATE_FILE) -> dict:
@@ -77,11 +78,11 @@ def find_part(bgr: np.ndarray, plate: dict) -> Search:
     if not inside:
         return Search("too_large" if too_large else "outside" if touching else "empty")
     if len(inside) > 1:
-        return Search("multiple")
+        return Search("multiple", crowded=too_large)
     (cx, cy), (rw, rh), angle = cv2.minAreaRect(inside[0])
     if rw < rh:  # make the first side the long one
         rw, rh, angle = rh, rw, angle + 90
-    return Search("found", Part((cx + x0, cy + y0), rw, rh, angle))
+    return Search("found", Part((cx + x0, cy + y0), rw, rh, angle), crowded=too_large)
 
 
 def aligned_crop(bgr: np.ndarray, part: Part, size: int = CROP_SIZE) -> np.ndarray:
