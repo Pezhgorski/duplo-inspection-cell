@@ -265,7 +265,9 @@ Photos are captured per session (`capture.py --session sessionN`, good and defec
 Training: anomalib PatchCore (wide_resnet50_2, layers 2+3) on aligned crops, export to ONNX,
 runtime uses ONNX Runtime (CUDA, CPU fallback). Threshold: midpoint between the highest val-good and
 lowest val-defect score; if they overlap, the value that rejects all val defects, and the overlap is
-reported. `evaluate.py` prints the confusion matrix and per-defect-type scores and saves a heatmap
+reported. If val has no surface defects (or no good bricks), the side that exists sets the bound and
+anomalib's 0.5 fills in for the other; training prints a WARNING and meta.json records
+`threshold_basis`. NaN/inf scores stop training. `evaluate.py` prints the confusion matrix and per-defect-type scores and saves a heatmap
 sheet; those numbers go into the README unedited.
 
 ## 11. Testing

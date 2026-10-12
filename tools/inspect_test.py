@@ -69,7 +69,7 @@ def inspect(frame, plate, model, meta) -> dict:
         "verdict": "OK" if ok else "NG", "color": GREEN if ok else RED, "crop": crop, "heat": heat,
         "box": part_box(part), "part": part, "status": search.status, "crowded": search.crowded,
         "lines": [", ".join(reasons) if reasons else "all checks passed",
-                  f"anomaly score {score:.3f}  (threshold {meta['threshold']:.3f})",
+                  f"anomaly score {score:.4f}  (threshold {meta['threshold']:.4f})",
                   f"size {part.length:.0f} x {part.width:.0f} px",
                   f"inference {ms:.0f} ms"],
     }
