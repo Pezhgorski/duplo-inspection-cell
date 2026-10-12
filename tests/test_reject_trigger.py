@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 
 from cell.actuator import RejectJob
-from cell.reject import SETTLE_FRAMES, VERIFY_FRAMES, RejectTrigger
+from cell.reject import EMPTY_FRAMES, SETTLE_FRAMES, VERIFY_FRAMES, RejectTrigger
 
 
 @dataclass
@@ -81,7 +81,7 @@ def test_part_knocked_away_is_verified_and_struck_once():
     strike(t, arm, Part((300, 200)))
     frames(t, arm, VERIFY_FRAMES, status="empty", verdict=None)
     assert t.state == "CLEARING"
-    frames(t, arm, 1, status="empty", verdict=None)
+    frames(t, arm, EMPTY_FRAMES, status="empty", verdict=None)
     assert t.state == "ARMED"
     assert len(arm.jobs) == 1
 
@@ -94,7 +94,7 @@ def test_part_pushed_but_still_in_box_waits_for_removal():
     assert t.state == "CLEARING" and "verified" in t.message
     frames(t, arm, 30, part=moved)  # still NG and settled, but already struck
     assert len(arm.jobs) == 1
-    frames(t, arm, 1, status="empty", verdict=None)
+    frames(t, arm, EMPTY_FRAMES, status="empty", verdict=None)
     assert t.state == "ARMED"
 
 
@@ -119,7 +119,7 @@ def test_unmoved_part_is_reject_failed():
     assert t.state == "FAILED" and t.message.startswith("REJECT_FAILED")
     frames(t, arm, 30, part=Part((310, 205)))
     assert len(arm.jobs) == 1  # no automatic second strike
-    frames(t, arm, 1, status="empty", verdict=None)
+    frames(t, arm, EMPTY_FRAMES, status="empty", verdict=None)
     assert t.state == "ARMED"
 
 
@@ -137,3 +137,41 @@ def test_hand_in_the_box_does_not_rearm():
     frames(t, arm, VERIFY_FRAMES, part=Part((450, 200)))
     frames(t, arm, 5, status="outside", verdict=None)  # operator's hand reaching in
     assert t.state == "CLEARING"
+
+
+def test_hand_next_to_an_ng_part_holds_the_strike():
+    t, arm = RejectTrigger(), FakeActuator()
+    for _ in range(3 * SETTLE_FRAMES):
+        t.update("found", "NG", Part((300, 200)), arm, crowded=True)
+    assert not arm.jobs
+    assert "hand" in t.message
+    frames(t, arm, SETTLE_FRAMES, part=Part((300, 200)))  # hand gone: settles again, then strikes
+    assert len(arm.jobs) == 1
+
+
+def test_hand_during_verify_is_not_a_verified_reject():
+    t, arm = RejectTrigger(), FakeActuator()
+    strike(t, arm, Part((300, 200)))
+    frames(t, arm, 2 * VERIFY_FRAMES, status="too_large", verdict=None)
+    assert t.state == "VERIFY"
+    frames(t, arm, VERIFY_FRAMES, part=Part((300, 200)))  # hand gone, the part never moved
+    assert t.state == "FAILED"
+
+
+def test_edge_hand_during_verify_is_not_a_verified_reject():
+    t, arm = RejectTrigger(), FakeActuator()
+    strike(t, arm, Part((300, 200)))
+    frames(t, arm, 2 * VERIFY_FRAMES, status="outside", verdict=None)  # a hand reaching in, part hidden
+    assert t.state == "VERIFY" and "hand" in t.message
+    frames(t, arm, VERIFY_FRAMES, part=Part((300, 200)))  # hand gone, the part never moved
+    assert t.state == "FAILED"
+
+
+def test_one_empty_frame_does_not_rearm():
+    t, arm = RejectTrigger(), FakeActuator()
+    strike(t, arm, Part((300, 200)))
+    frames(t, arm, VERIFY_FRAMES, part=Part((310, 205)))  # REJECT_FAILED
+    frames(t, arm, 1, status="empty", verdict=None)       # one bad frame from find_part
+    frames(t, arm, 30, part=Part((310, 205)))
+    assert t.state == "FAILED"
+    assert len(arm.jobs) == 1

@@ -105,7 +105,7 @@ static void test_strike_parameters_from_master() {
   CHECK(rig.arm.position() == 0);
 }
 
-// a strike at full speed (~0.7 s) is shorter than the watchdog, so slow it down to catch it mid-move
+// a strike at full speed (~0.67 s on FakeArm, which has no ramps) is shorter than the watchdog, so slow it down to catch it mid-move
 static void slowStrike(Rig& rig) { rig.regs.holding[reg::MAX_SPEED] = 400; }  // 800 steps = 2 s out
 
 static void test_watchdog_stops_motor_mid_strike() {
@@ -219,9 +219,9 @@ static void test_stalled_motor_times_out() {
   rig.run(100);
   rig.arm.stalled = true;
   rig.setRequest(true);
-  rig.run(2400);
+  rig.run(1250);
   CHECK(rig.busy());
-  rig.run(200);
+  rig.run(100);
   CHECK(rig.faulted());
   CHECK(rig.faultCode() == FAULT_MOVE_TIMEOUT);
   CHECK(rig.arm.halts == 1);
@@ -252,6 +252,66 @@ static void test_survives_millis_wraparound() {
   CHECK(rig.ready());
 }
 
+static void test_stroke_timeout_follows_the_settings() {
+  uint32_t fast = RejectController::strokeTimeoutMs(800, 2400, 12000);
+  CHECK(fast >= 1290 && fast <= 1310);  // 1.5 x 0.533 s + 0.5 s
+  CHECK(RejectController::strokeTimeoutMs(-800, 2400, 12000) == fast);
+  CHECK(RejectController::strokeTimeoutMs(800, 300, 12000) > 4000);
+  CHECK(RejectController::strokeTimeoutMs(800, 0, 0) > 0);  // bad registers: no division by zero
+}
+
+static void test_slow_strike_is_not_a_move_timeout() {
+  Rig rig;
+  rig.regs.holding[reg::MAX_SPEED] = 300;  // 2.7 s per stroke: over the old fixed 2.5 s
+  rig.run(100);
+  rig.setRequest(true);
+  runUntilDone(rig, 8000);
+  CHECK(rig.done());
+  CHECK(!rig.faulted());
+  CHECK(rig.cycles() == 1);
+}
+
+static void test_strike_marks_the_arm_away_until_home() {
+  Rig rig;
+  rig.run(100);
+  rig.setRequest(true);
+  rig.run(50);
+  CHECK(rig.persist.away);           // out on a stroke: a reboot now would lose home
+  runUntilDone(rig);
+  CHECK(!rig.persist.away);          // back home
+  CHECK(rig.persist.writes == 2);    // one EEPROM write each way, not one per loop
+}
+
+static void test_fault_mid_strike_keeps_the_arm_marked_away() {
+  Rig rig;
+  slowStrike(rig);
+  rig.run(100);
+  rig.setRequest(true);
+  rig.run(150);
+  rig.masterBeating = false;
+  rig.run(1100);
+  CHECK(rig.faulted());
+  CHECK(rig.persist.away);
+}
+
+static void test_boot_away_from_home_faults_until_reset() {
+  Rig rig;
+  rig.persist.away = true;           // the Mega restarted while the stick was out
+  rig.arm.reboot();
+  rig.ctrl.begin(rig.now);
+  rig.run(200);
+  CHECK(rig.faulted());
+  CHECK(rig.faultCode() == FAULT_NOT_HOME);
+  rig.setRequest(true);
+  rig.run(100);
+  CHECK(rig.arm.maxPos == 0);        // no strike from an unknown position
+  rig.setRequest(false);
+  rig.setReset(true);                // the operator has put the stick home by hand
+  rig.run(1);
+  CHECK(rig.ready());
+  CHECK(!rig.persist.away);
+}
+
 int main() {
   struct { const char* name; void (*fn)(); } tests[] = {
       {"not_ready_until_master_heartbeat", test_not_ready_until_master_heartbeat},
@@ -269,6 +329,11 @@ int main() {
       {"stalled_motor_times_out", test_stalled_motor_times_out},
       {"stall_on_the_way_back_times_out", test_stall_on_the_way_back_times_out},
       {"survives_millis_wraparound", test_survives_millis_wraparound},
+      {"stroke_timeout_follows_the_settings", test_stroke_timeout_follows_the_settings},
+      {"slow_strike_is_not_a_move_timeout", test_slow_strike_is_not_a_move_timeout},
+      {"strike_marks_the_arm_away_until_home", test_strike_marks_the_arm_away_until_home},
+      {"fault_mid_strike_keeps_the_arm_marked_away", test_fault_mid_strike_keeps_the_arm_marked_away},
+      {"boot_away_from_home_faults_until_reset", test_boot_away_from_home_faults_until_reset},
   };
   for (auto& t : tests) {
     current = t.name;

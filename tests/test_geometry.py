@@ -62,5 +62,29 @@ def test_hand_reaching_in_from_the_edge_is_too_large():
 
 def test_a_complete_brick_still_wins_over_edge_clutter():
     x0, _, _, _ = plate_pixels(PLATE, 1280, 720)
-    search = find_part(image(((640, 360), (170, 85), 0), ((x0, 200), (60, 60), 0)), PLATE)
+    search = find_part(image(((640, 360), (170, 85), 0), ((x0, 200), (120, 120), 0)), PLATE)
     assert search.status == "found"
+    assert search.crowded  # edge clutter still holds the strike by design (see Search.crowded)
+
+
+def test_a_hand_reaching_in_from_the_edge_marks_a_complete_brick_crowded():
+    x0, _, _, _ = plate_pixels(PLATE, 1280, 720)
+    hand = ((x0 + 60, 360), (150, 160), 0)  # 150 x 160 = 24000 px, well under MAX_AREA, touching the left edge
+    assert hand[1][0] * hand[1][1] < MAX_AREA
+    search = find_part(image(((700, 360), (170, 85), 0), hand), PLATE)
+    assert search.status == "found"
+    assert search.crowded
+    assert search.part.center == pytest.approx((700, 360), abs=2)
+
+
+def test_hand_next_to_a_complete_brick_marks_the_search_crowded():
+    brick, hand = ((480, 360), (170, 85), 0), ((740, 360), (260, 240), 0)
+    assert hand[1][0] * hand[1][1] > MAX_AREA
+    search = find_part(image(brick, hand), PLATE)
+    assert search.status == "found"   # still inspected: training data and the HMI are unchanged
+    assert search.crowded             # but the trigger must not strike
+    assert search.part.center == pytest.approx((480, 360), abs=2)
+
+
+def test_single_brick_is_not_crowded():
+    assert not find_part(image(((640, 360), (170, 85), 30)), PLATE).crowded

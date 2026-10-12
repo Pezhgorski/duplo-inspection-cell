@@ -1,5 +1,16 @@
 #include "RejectController.h"
 
+#include <math.h>
+
+uint32_t RejectController::strokeTimeoutMs(long steps, float speed, float accel) {
+  const float s = (float)(steps < 0 ? -steps : steps);
+  if (speed < 1) speed = 1;  // a zero register must not divide by zero
+  if (accel < 1) accel = 1;
+  const float ramp = speed * speed / accel;  // steps spent speeding up and slowing down from full speed
+  const float t = s >= ramp ? s / speed + speed / accel : 2 * sqrtf(s / accel);
+  return (uint32_t)(STROKE_SLACK * t * 1000.0f) + STROKE_MARGIN_MS;
+}
+
 void RejectController::begin(uint32_t now) {
   for (bool& c : regs_.coils) c = false;
   regs_.holding[reg::MASTER_HEARTBEAT] = 0;
@@ -8,9 +19,22 @@ void RejectController::begin(uint32_t now) {
   regs_.holding[reg::ACCELERATION] = DEFAULT_ACCELERATION;
   regs_.input[reg::SLAVE_HEARTBEAT] = 0;
   home_ = arm_.position();
+  strikeTarget_ = home_;
+  strokeStart_ = now;
+  moveTimeoutMs_ = 0;
   lastBeat_ = now;
+  lastMasterBeat_ = 0;
   masterBeatAt_ = now;
+  masterSeen_ = false;
+  requestArmed_ = false;
+  prevReset_ = false;
+  cycleCount_ = 0;
+  faultCode_ = FAULT_NONE;
   state_ = WAIT_MASTER;
+  if (persist_.awayFromHome()) {  // restarted mid-stroke: this "home" is wherever the stick stopped
+    faultCode_ = FAULT_NOT_HOME;
+    state_ = FAULTED;
+  }
   publish();
 }
 
@@ -44,6 +68,7 @@ void RejectController::update(uint32_t now) {
         arm_.configure(regs_.holding[reg::MAX_SPEED], regs_.holding[reg::ACCELERATION]);
         // signed: a negative value strikes in the other direction
         strikeTarget_ = home_ + (int16_t)regs_.holding[reg::STRIKE_STEPS];
+        persist_.setAwayFromHome(true);
         startStroke(strikeTarget_, STRIKE_OUT, now);
       }
       break;
@@ -55,12 +80,14 @@ void RejectController::update(uint32_t now) {
         if (state_ == STRIKE_OUT) {
           startStroke(home_, STRIKE_BACK, now);
         } else if (state_ == STRIKE_BACK) {
+          persist_.setAwayFromHome(false);
           cycleCount_++;
           state_ = DONE;
         } else {
+          persist_.setAwayFromHome(false);
           state_ = IDLE;
         }
-      } else if (now - strokeStart_ > MOVE_TIMEOUT_MS) {
+      } else if (now - strokeStart_ > moveTimeoutMs_) {
         fault(FAULT_MOVE_TIMEOUT);
       }
       break;
@@ -73,6 +100,7 @@ void RejectController::update(uint32_t now) {
         faultCode_ = FAULT_NONE;
         requestArmed_ = !request;  // a request raised before the reset is stale: it must drop first
         if (arm_.position() == home_) {
+          persist_.setAwayFromHome(false);  // after NOT_HOME the operator vouches that the stick is home
           state_ = IDLE;
         } else {
           arm_.configure(regs_.holding[reg::MAX_SPEED], regs_.holding[reg::ACCELERATION]);
@@ -85,6 +113,8 @@ void RejectController::update(uint32_t now) {
 }
 
 void RejectController::startStroke(long target, State next, uint32_t now) {
+  moveTimeoutMs_ = strokeTimeoutMs(target - arm_.position(), regs_.holding[reg::MAX_SPEED],
+                                   regs_.holding[reg::ACCELERATION]);
   arm_.moveTo(target);
   strokeStart_ = now;
   state_ = next;

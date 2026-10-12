@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from cell.actuator import (BUSY_TIMEOUT, COIL_REQ_REJECT, COIL_RESET_FAULT, DONE_TIMEOUT,
+from cell.actuator import (BUSY_TIMEOUT, COIL_REQ_REJECT, COIL_RESET_FAULT,
                            HR_MASTER_HEARTBEAT, HR_STRIKE_STEPS, ActuatorMaster, ActuatorThread,
-                           BusError, Phase, Status)
+                           BusError, Phase, Status, move_timeout, stroke_time)
 from sim import SimClock, run
 
 
@@ -214,7 +214,7 @@ def test_no_done_times_out(master, slave, clock):
     job = reject(master, clock, seconds=5.0)
     assert job.state == "failed"
     assert "DONE" in master.fault
-    assert clock() - 100.3 == pytest.approx(DONE_TIMEOUT + 0.05, abs=0.06)
+    assert clock() - 100.3 == pytest.approx(master.done_timeout + 0.05, abs=0.06)
 
 
 def test_done_never_cleared_times_out(master, slave, clock):
@@ -326,3 +326,214 @@ def test_thread_runs_the_handshake_in_real_time():
         assert "idle" in actuator.describe()
     finally:
         actuator.stop()
+
+
+def test_stroke_time_trapezoid_and_triangle():
+    assert stroke_time(800, 2400, 12000) == pytest.approx(800 / 2400 + 2400 / 12000)
+    assert stroke_time(100, 2400, 12000) == pytest.approx(2 * (100 / 12000) ** 0.5)  # never at full speed
+    assert stroke_time(-800, 2400, 12000) == stroke_time(800, 2400, 12000)
+
+
+def test_done_timeout_follows_the_strike_settings(clock, slave):
+    fast = ActuatorMaster(slave, clock=clock)
+    slow = ActuatorMaster(slave, speed=600, clock=clock)
+    assert fast.done_timeout == pytest.approx(2 * move_timeout(800, 2400, 12000) + 0.5)
+    assert slow.done_timeout > fast.done_timeout
+
+
+def test_slow_strike_is_not_a_timeout(clock, slave):
+    slave.strike_time = 3.3  # 600 steps/s on the real stepper, ramps and Modbus pauses included
+    m = ActuatorMaster(slave, speed=600, clock=clock)
+    run(m, clock, 0.3)
+    assert reject(m, clock, seconds=8.0).state == "done", m.fault
+
+
+@pytest.mark.parametrize("kwargs", [dict(strike_steps=40000), dict(strike_steps=0), dict(speed=0),
+                                    dict(speed=5000), dict(accel=0), dict(accel=70000)])
+def test_rejects_out_of_range_strike_settings(clock, slave, kwargs):
+    with pytest.raises(ValueError):
+        ActuatorMaster(slave, clock=clock, **kwargs)
+
+
+def test_not_home_needs_confirm_home_not_reset(master, slave, clock):
+    slave.trip(3)  # the arm restarted while the stick was out
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault and "press R" in master.fault
+    master.reset()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
+    master.confirm_home()
+    run(master, clock, 0.1)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def test_confirm_home_does_not_clear_other_faults(master, slave, clock):
+    slave.trip(2)
+    run(master, clock, 0.1)
+    master.confirm_home()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
+
+
+def test_not_home_after_another_fault_is_still_confirm_home_only(master, slave, clock):
+    slave.trip(2)  # latched as MOVE_TIMEOUT
+    run(master, clock, 0.1)
+    assert "MOVE_TIMEOUT" in master.fault
+    slave.trip(3)  # the arm then restarted while the stick was out
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    master.reset()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
+    master.confirm_home()
+    run(master, clock, 0.1)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def wait_until(cond, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+def test_not_ready_without_a_recent_status(master, clock):
+    assert master.ready
+    clock.advance(1.0)  # no step() ran: e.g. the actuator thread is stuck
+    assert not master.ready
+    assert master.request_reject() is None
+
+
+def test_thread_survives_a_bug_in_step_and_reports_it():
+    slave = FakeSlave(time.monotonic)
+    slave.strike_time = 1.0
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    try:
+        assert wait_until(lambda: actuator.master.ready)
+        job = actuator.request_reject()
+
+        def broken():
+            raise KeyError("unexpected response")
+
+        slave.read_status = broken
+        assert wait_until(lambda: job.state != "pending")
+        assert job.state == "failed" and "ACTUATOR_INTERNAL" in job.error
+        assert actuator.master.phase is Phase.FAULT
+        assert "ACTUATOR_INTERNAL" in actuator.describe()
+        assert actuator._thread.is_alive()
+    finally:
+        actuator.stop()
+
+
+def test_reset_clears_an_internal_error_even_after_not_home(master, slave, clock):
+    slave.trip(3)  # NOT_HOME latched earlier
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    slave.fault, slave.fault_code = False, 0  # the operator has since dealt with the arm
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")
+    master.reset()  # X must work: this is no longer a NOT_HOME latch
+    run(master, clock, 0.2)
+    assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def test_slave_comm_lost_after_a_master_stall_recovers_by_itself(master, slave, clock):
+    slave.trip(1)  # this process stalled > 1 s; the link itself is fine again
+    run(master, clock, 0.2)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
+    assert reject(master, clock).state == "done"
+
+
+def test_slave_comm_lost_mid_cycle_fails_the_job_then_recovers(master, slave, clock):
+    slave.strike_time = 2.0
+    job = master.request_reject()
+    run(master, clock, 0.1)
+    slave.trip(1)
+    run(master, clock, 0.2)
+    assert job.state == "failed" and "COMM_LOST" in job.error
+    assert master.phase is Phase.IDLE
+
+
+def test_stop_lets_a_running_strike_finish():
+    slave = FakeSlave(time.monotonic)
+    slave.strike_time = 0.3
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    assert wait_until(lambda: actuator.master.ready)
+    job = actuator.request_reject()
+    assert actuator.stop(drain=2.0)          # Q pressed right after the strike started
+    assert job.state == "done"
+    assert slave.coils[COIL_REQ_REJECT] is False
+    assert actuator.request_reject() is None  # no new strikes once closing
+
+
+def test_reset_and_confirm_home_report_whether_a_reset_was_queued(master, slave, clock):
+    assert master.reset() is False and master.confirm_home() is False  # nothing to reset
+    slave.trip(2)
+    run(master, clock, 0.1)
+    assert master.confirm_home() is False  # R only confirms home after NOT_HOME
+    assert master.reset() is True
+    run(master, clock, 0.1)
+    assert master.phase is Phase.IDLE
+    slave.trip(3)
+    run(master, clock, 0.1)
+    assert master.reset() is False  # X does not clear NOT_HOME
+    assert master.confirm_home() is True
+    run(master, clock, 0.1)
+    assert master.phase is Phase.IDLE and slave.resets == 2
+
+
+def test_thread_passes_the_reset_result_through():
+    slave = FakeSlave(time.monotonic)
+    actuator = ActuatorThread(ActuatorMaster(slave), period=0.01).start()
+    try:
+        assert wait_until(lambda: actuator.master.ready)
+        assert actuator.reset() is False and actuator.confirm_home() is False
+        slave.trip(2)
+        assert wait_until(lambda: actuator.master.phase is Phase.FAULT)
+        assert actuator.confirm_home() is False
+        assert actuator.reset() is True
+    finally:
+        actuator.stop()
+
+
+def test_internal_error_drops_the_request_coil(master, slave, clock):
+    slave.strike_time = 2.0
+    master.request_reject()
+    run(master, clock, 0.1)
+    assert slave.coils[COIL_REQ_REJECT] is True
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")
+    assert slave.coils[COIL_REQ_REJECT] is False
+
+
+def test_internal_error_survives_a_dead_bus(master, slave, clock):
+    slave.offline = True
+    master.internal_error("ACTUATOR_INTERNAL: KeyError: x")  # the best-effort coil write must not raise
+    assert master.phase is Phase.FAULT
+
+
+def test_x_after_an_internal_error_does_not_clear_a_live_not_home(master, slave, clock):
+    slave.trip(3)  # the arm restarted mid-strike and still reports NOT_HOME
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault
+    master.internal_error("ACTUATOR_INTERNAL: x")
+    master.reset()  # allowed to queue (this is no longer a NOT_HOME latch) ...
+    run(master, clock, 0.3)
+    assert master.phase is Phase.FAULT and "NOT_HOME" in master.fault  # ... but the live fault wins
+    assert slave.resets == 0
+
+
+def test_not_home_found_at_connect_needs_confirm_home(clock):
+    slave = FakeSlave(clock)
+    slave.trip(3)  # the Mega restarted away from home before this master connected
+    m = ActuatorMaster(slave, clock=clock)
+    run(m, clock, 0.3)
+    assert m.phase is Phase.FAULT and "NOT_HOME" in m.fault
+    assert m.reset() is False
+    run(m, clock, 0.2)
+    assert m.phase is Phase.FAULT and slave.resets == 0
+    assert m.confirm_home() is True
+    run(m, clock, 0.2)
+    assert slave.resets == 1
+    assert m.phase is Phase.IDLE and m.fault == ""

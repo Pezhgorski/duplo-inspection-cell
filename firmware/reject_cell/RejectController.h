@@ -22,7 +22,7 @@ enum Holding : uint8_t { MASTER_HEARTBEAT, STRIKE_STEPS, MAX_SPEED, ACCELERATION
 enum Input : uint8_t { SLAVE_HEARTBEAT, FAULT_CODE, CYCLE_COUNT, INPUT_COUNT };
 }  // namespace reg
 
-enum FaultCode : uint16_t { FAULT_NONE = 0, FAULT_COMM_LOST = 1, FAULT_MOVE_TIMEOUT = 2 };
+enum FaultCode : uint16_t { FAULT_NONE = 0, FAULT_COMM_LOST = 1, FAULT_MOVE_TIMEOUT = 2, FAULT_NOT_HOME = 3 };
 
 // The arrays ModbusRTUSlave serves; the controller reads and writes them directly.
 struct Registers {
@@ -42,11 +42,23 @@ class Actuator {
   virtual void configure(float maxSpeed, float acceleration) = 0;
 };
 
+// One flag that survives a reset (EEPROM on the Mega): the stick is away from home. Home is the
+// power-on position, so a restart while away would silently move home; the flag catches that.
+class Persist {
+ public:
+  virtual bool awayFromHome() = 0;
+  virtual void setAwayFromHome(bool away) = 0;
+};
+
 class RejectController {
  public:
   static const uint32_t HEARTBEAT_MS = 100;      // slave heartbeat period
   static const uint32_t WATCHDOG_MS = 1000;      // master heartbeat must change within this
-  static const uint32_t MOVE_TIMEOUT_MS = 2500;  // per stroke (out, back, or return after a reset)
+  // stroke timeout = ideal stroke time (trapezoidal speed profile) x STROKE_SLACK + STROKE_MARGIN_MS;
+  // the slack covers the ~25 % of loop() the Modbus requests take. cell/actuator.py mirrors this.
+  static constexpr float STROKE_SLACK = 1.5f;
+  static const uint32_t STROKE_MARGIN_MS = 500;
+  static uint32_t strokeTimeoutMs(long steps, float speed, float accel);
 
   // defaults until the master writes its own; 3200 steps/rev, so 800 = a quarter turn
   static const int16_t DEFAULT_STRIKE_STEPS = 800;
@@ -55,9 +67,10 @@ class RejectController {
 
   enum State : uint8_t { WAIT_MASTER, IDLE, STRIKE_OUT, STRIKE_BACK, DONE, RETURNING, FAULTED };
 
-  RejectController(Registers& regs, Actuator& arm) : regs_(regs), arm_(arm) {}
+  RejectController(Registers& regs, Actuator& arm, Persist& persist)
+      : regs_(regs), arm_(arm), persist_(persist) {}
 
-  // The power-on position is home: there is no limit switch.
+  // Power-on: resets all state. The power-on position is home (no limit switch), unless the flag says the stick was away.
   void begin(uint32_t now);
   // Call every loop(), after modbus.poll().
   void update(uint32_t now);
@@ -72,10 +85,12 @@ class RejectController {
 
   Registers& regs_;
   Actuator& arm_;
+  Persist& persist_;
   State state_ = WAIT_MASTER;
   long home_ = 0;
   long strikeTarget_ = 0;
   uint32_t strokeStart_ = 0;
+  uint32_t moveTimeoutMs_ = 0;
   uint32_t lastBeat_ = 0;
   uint16_t lastMasterBeat_ = 0;
   uint32_t masterBeatAt_ = 0;

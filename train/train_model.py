@@ -4,7 +4,7 @@ Split (seeded): every 4th located good brick -> val, the rest -> train; all defe
 The model learns from good bricks only. The OK/NG threshold is chosen on val:
 - midpoint between the highest good score and the lowest defect score, if they separate;
 - otherwise the value that still rejects every defect, and the overlap is reported;
-- if val has no good bricks or no surface defects, see cell/threshold.py.
+- if val has no good bricks or no surface defects: one-sided, with anomalib's 0.5 as the other bound (cell/threshold.py), and a WARNING.
 Only defects that pass the size rule count for the threshold - wrong shapes are the rule's job.
 
 Usage:  python train/train_model.py [--session session1]
@@ -108,12 +108,15 @@ def main():
     missed = sum(r["label"] == "defect" and r["verdict"] == "OK" for r in results)
     note = {"overlap": "OVERLAP: set to reject every defect"}.get(basis, basis)
     print(f"\nthreshold {threshold:.3f} ({note})")
+    if basis not in ("separable", "overlap"):
+        print(f"WARNING: threshold not validated against both good and defect bricks ({basis}); "
+              f"capture more val data before trusting the surface check")
     print(f"val: {len(good)} good, {len(results) - len(good)} defect -> "
           f"{false_rejects} good falsely rejected, {missed} defects missed")
 
     meta = {
         "model": str(model_path.relative_to(ROOT)), "session": session.name, "seed": SEED,
-        "crop_size": CROP_SIZE, "threshold": threshold, "separable": basis == "separable",
+        "crop_size": CROP_SIZE, "threshold": threshold, "separable": {"separable": True, "overlap": False}.get(basis),
         "threshold_basis": basis,
         "size_reference": ref, "val": results,
     }

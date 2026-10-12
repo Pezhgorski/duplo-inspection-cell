@@ -5,7 +5,8 @@
 struct Sim {
   Registers regs{};
   FakeArm arm;
-  RejectController ctrl{regs, arm};
+  FakePersist persist;
+  RejectController ctrl{regs, arm, persist};
   uint32_t now = 0;
   Sim() { ctrl.begin(now); }
 };
@@ -43,3 +44,15 @@ API long sim_max_position(Sim* s) { return s->arm.maxPos; }
 API long sim_min_position(Sim* s) { return s->arm.minPos; }
 API void sim_set_stalled(Sim* s, int stalled) { s->arm.stalled = stalled != 0; }
 API int sim_state(Sim* s) { return s->ctrl.state(); }
+
+API uint32_t sim_stroke_timeout_ms(int steps, int speed, int accel) {
+  return RejectController::strokeTimeoutMs(steps, (float)speed, (float)accel);
+}
+
+// power-cycle the Mega: registers and the step counter start from zero, the EEPROM flag survives
+API void sim_reboot(Sim* s) {
+  s->regs = Registers{};
+  s->arm.reboot();
+  s->ctrl.begin(s->now);
+}
+API int sim_away(Sim* s) { return s->persist.away; }

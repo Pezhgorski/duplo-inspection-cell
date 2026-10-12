@@ -3,11 +3,12 @@
 Usage:  python tools/inspect_test.py [--port COM4] [--strike-steps 800] [--reverse] [--no-motor]
 
 Keys:
-  R      real-time mode on/off: inspect every frame (starts on)
+  T      real-time mode on/off: inspect every frame (starts on)
   A      auto-reject on/off: in real-time mode a settled NG part is struck once, then the
          camera verifies it moved (starts on when the arm is connected)
   SPACE  inspect once and freeze the result (turns real-time off)
   K      strike now (manual), through the same Modbus handshake
+  R      the stick is back home: only asked for after the arm restarted mid-strike (NOT_HOME)
   X      reset an arm fault
   L      re-lock camera exposure / white balance
   Q/ESC  quit
@@ -31,7 +32,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from capture import (AUTO_SETTLE_FRAMES, CameraSettings, color_sensor,  # noqa: E402
                      reset_depth_sensor, start_pipeline)
-from cell.actuator import COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus  # noqa: E402
+from cell.actuator import (COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus,  # noqa: E402
+                           Phase, check_strike)
 from cell.anomaly import AnomalyModel, roi_score  # noqa: E402
 from cell.geometry import aligned_crop, find_part, load_plate, part_box, plate_pixels  # noqa: E402
 from cell.reject import RejectTrigger  # noqa: E402
@@ -52,7 +54,7 @@ def inspect(frame, plate, model, meta) -> dict:
     search = find_part(frame, plate)
     if search.status != "found":
         return {"verdict": "NO INSPECTION", "color": YELLOW, "status": search.status,
-                "lines": [SEARCH_MESSAGES[search.status]]}
+                "crowded": search.crowded, "lines": [SEARCH_MESSAGES[search.status]]}
     part = search.part
     crop = aligned_crop(frame, part)
     start = time.time()
@@ -65,9 +67,9 @@ def inspect(frame, plate, model, meta) -> dict:
     ok = not reasons
     return {
         "verdict": "OK" if ok else "NG", "color": GREEN if ok else RED, "crop": crop, "heat": heat,
-        "box": part_box(part), "part": part, "status": search.status,
+        "box": part_box(part), "part": part, "status": search.status, "crowded": search.crowded,
         "lines": [", ".join(reasons) if reasons else "all checks passed",
-                  f"anomaly score {score:.3f}  (threshold {meta['threshold']:.3f})",
+                  f"anomaly score {score:.4f}  (threshold {meta['threshold']:.4f})",
                   f"size {part.length:.0f} x {part.width:.0f} px",
                   f"inference {ms:.0f} ms"],
     }
@@ -109,17 +111,22 @@ def main() -> int:
     print("loading model...")
     model = AnomalyModel(ROOT / meta["model"])
     plate = load_plate()
-    actuator = None
+    master = actuator = None
     if not args.no_motor:
         steps = -args.strike_steps if args.reverse else args.strike_steps
+        try:
+            check_strike(steps, args.speed, args.accel)
+        except ValueError as exc:
+            parser.error(str(exc))
         master = ActuatorMaster(ModbusBus.serial(args.port), strike_steps=steps, speed=args.speed, accel=args.accel)
-        actuator = ActuatorThread(master).start()
-    trigger, auto_reject = RejectTrigger(), actuator is not None
 
     pipeline, profile = start_pipeline()
     reset_depth_sensor(profile)
     settings = CameraSettings(color_sensor(profile))
     settings.set_auto()
+    if master is not None:  # start the arm's heartbeat only once the camera is up
+        actuator = ActuatorThread(master).start()
+    trigger, auto_reject = RejectTrigger(), actuator is not None
     grab = lambda: np.asanyarray(pipeline.wait_for_frames().get_color_frame().get_data())
     relock_at, frames_seen = AUTO_SETTLE_FRAMES, 0
     result, status = None, "metering camera..."
@@ -137,7 +144,8 @@ def main() -> int:
             if realtime and relock_at is None:
                 result = inspect(frame, plate, model, meta)
                 if auto_reject:
-                    trigger.update(result["status"], result["verdict"], result.get("part"), actuator)
+                    trigger.update(result["status"], result["verdict"], result.get("part"), actuator,
+                                   crowded=result["crowded"])
             now = time.time()
             fps = 0.9 * fps + 0.1 / max(now - last_tick, 1e-3)  # smoothed loop rate
             last_tick = now
@@ -158,14 +166,14 @@ def main() -> int:
                 bad = actuator is not None and i == 0 and actuator.master.fault
                 cv2.putText(view, line, (12, 60 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             RED if bad else WHITE, 2 if bad else 1, cv2.LINE_AA)
-            cv2.putText(view, "R real-time | A auto | SPACE snapshot | K strike | X reset | L re-lock | Q quit",
+            cv2.putText(view, "T real-time | A auto | SPACE snapshot | K strike | R stick home | X reset | L re-lock | Q quit",
                         (12, 700), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
             cv2.imshow(WINDOW, np.hstack([view, result_panel(result)]))
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("r"):
+            if key == ord("t"):
                 realtime = not realtime
             elif key == ord(" ") and relock_at is None:
                 realtime = False
@@ -180,21 +188,32 @@ def main() -> int:
                 else:
                     status = "strike requested" if actuator.request_reject() else "arm not ready"
             elif key == ord("x") and actuator is not None:
-                actuator.reset()
-                status = "arm reset requested"
+                if actuator.reset():
+                    status = "arm reset requested"
+                elif actuator.master.phase is Phase.FAULT:
+                    status = "X does not clear NOT_HOME: put the stick home, press R"
+                else:
+                    status = "no fault to reset"
+            elif key == ord("r") and actuator is not None:
+                status = ("stick home confirmed" if actuator.confirm_home()
+                          else "R only confirms home after NOT_HOME")
             elif key == ord("l"):
                 settings.set_auto()
                 relock_at, status = frames_seen + AUTO_SETTLE_FRAMES, "re-metering camera..."
     finally:
-        pipeline.stop()
-        cv2.destroyAllWindows()
-        if actuator:
-            actuator.stop()
-            try:
-                actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
-            except BusError:
-                pass
-            actuator.master.bus.close()
+        try:
+            if actuator:
+                # the arm first, so a camera error cannot skip it: let a running strike come home
+                # before the port closes and the watchdog would halt it
+                if actuator.stop(drain=actuator.master.done_timeout):
+                    try:
+                        actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
+                    except BusError:
+                        pass
+                    actuator.master.bus.close()
+        finally:
+            pipeline.stop()
+            cv2.destroyAllWindows()
     return 0
 
 

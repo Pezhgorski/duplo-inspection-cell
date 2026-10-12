@@ -96,13 +96,13 @@ app.py            entry point
 train/train.py    anomalib PatchCore training on train split, threshold from val split, ONNX export
 train/evaluate.py one-shot report on the test split (confusion matrix, per-defect scores, heatmap sheet)
 tools/            capture.py, camera_check.py (exist)
-firmware/reject_arm/reject_arm.ino
+firmware/reject_cell/   reject_cell.ino + RejectController (Arduino-free, unit-tested on the PC)
 tests/            pytest suite (§11)
 ```
 
 Each `cell/` module has one job and can be tested without the camera or Arduino:
 `locate/measure/rules/anomaly` take arrays and return values; `actuator` hides Modbus behind
-`request_reject()` / `poll()`; `cell.py` only sees those interfaces.
+`request_reject()` / `step()` (run by `ActuatorThread`); `cell.py` only sees those interfaces.
 
 ## 4. Inspection pipeline
 
@@ -150,11 +150,11 @@ IDLE ──part appears──► SETTLING ──stable N frames──► INSPECT
                                                          └──► NG ──► REJECTING ──DONE──► VERIFY
 VERIFY: part moved (see §1a) → wait for removal → IDLE;  part unmoved → FAULT(REJECT_FAILED)
 any state ──operator hand in view──► PAUSED ──view clear──► IDLE
-any state ──diagnostic/actuator fault──► FAULT ──R key (reset) and condition cleared──► IDLE
+any state ──diagnostic/actuator fault──► FAULT ──X key (reset; R = "stick is home" for NOT_HOME) and condition cleared──► IDLE
 ```
 
 - **Settling:** part center moves < 2 px over 5 consecutive frames.
-- **Hand detection:** a large blob entering from the image border → PAUSED, no inspection.
+- **Hand detection:** a large blob entering from the image border → PAUSED, no inspection. In the reject trigger, a blob over MAX_AREA or one touching the box edge next to a part holds the strike and pauses VERIFY; edge clutter therefore also holds it.
 - **Verify** uses vision to confirm the physical reject actually worked — the camera checks the robot.
 
 ## 6. Defects
@@ -187,14 +187,17 @@ plain USB serial, no RS-485 hardware needed).
 | Holding reg | 2 | MAX_SPEED | master → slave | steps/s (default 2400) |
 | Holding reg | 3 | ACCELERATION | master → slave | steps/s² (default 12000) |
 | Input reg | 0 | SLAVE_HEARTBEAT | slave → master | incremented every 100 ms |
-| Input reg | 1 | FAULT_CODE | slave → master | 0 none, 1 comm lost, 2 move timeout |
+| Input reg | 1 | FAULT_CODE | slave → master | 0 none, 1 comm lost, 2 move timeout, 3 not home |
 | Input reg | 2 | CYCLE_COUNT | slave → master | completed rejects |
 
 **Reject sequence (4-way handshake):** master checks READY → sets REQ_REJECT → slave sets BUSY,
 sweeps, returns, clears BUSY, sets DONE → master clears REQ_REJECT → slave clears DONE.
 
-**Timeouts (master):** BUSY within 300 ms of REQ, DONE within 3 s, slave heartbeat change within
-500 ms. **Watchdog (slave):** master heartbeat unchanged for 1 s → stop motor, FAULT_CODE=1.
+**Timeouts (master):** BUSY within 300 ms of REQ; DONE within 2 × the slave's stroke timeout + 0.5 s
+(3.1 s at the defaults); slave heartbeat change within 500 ms. **Slave:** each stroke must finish within
+1.5 × its ideal time for the set steps, speed and acceleration + 0.5 s (1.3 s at the defaults) →
+stop motor, FAULT_CODE=2; master heartbeat unchanged for 1 s → stop motor, FAULT_CODE=1. The master
+refuses strike settings outside |steps| 1..32767, speed 1..4000 steps/s, acceleration 1..65535.
 
 **Implementation:** `firmware/reject_cell` (slave; logic in `RejectController`, no Arduino
 dependencies) and `cell/actuator.py` (master, non-blocking `step()` run by a background thread
@@ -203,14 +206,23 @@ every 50 ms). Details settled while building it:
   stale request (e.g. raised during a fault) never strikes twice. RESET_FAULT acts on its rising edge.
 - After a reset the slave drives the arm home first (READY only once home).
 - On connect the master clears REQ_REJECT, writes the strike parameters and auto-resets a
-  COMM_LOST fault (the expected leftover of a previous master session), retrying until the slave
-  has seen the new heartbeat. Any other slave fault is latched for the operator.
+  COMM_LOST fault, retrying until the slave has seen the new heartbeat. Any other slave fault is
+  latched for the operator. (Opening the port resets the Mega, so a leftover COMM_LOST is rare.)
+- Home is the power-on position, so the firmware keeps an EEPROM flag "away from home", set when a
+  stroke leaves home and cleared on arrival. Booting with it set gives FAULT_CODE=3 NOT_HOME: no
+  strike until the operator has put the stick home and pressed R (X does not clear it). Only a
+  restart while away asks for R; normal start-ups and strikes do not.
 - BUSY may be missed when a strike finishes between two polls; DONE is accepted in its place.
   CYCLE_COUNT must rise by exactly one per handshake (ACTUATOR_COUNT_MISMATCH otherwise).
 - ModbusRTUSlave holds the Mega's loop for ~4-5 ms per request, during which no steps are taken;
   polling every 50 ms keeps that to a slightly slower strike, with exact positions.
-- A full-speed strike (~0.7 s) is shorter than the 1 s watchdog, so a master crash mid-strike
-  usually lets the strike finish; the watchdog guards slower moves and an idle arm.
+- A full strike at the defaults takes ~1.1-1.3 s on the real stepper (ramps plus the Modbus pauses),
+  longer than the 1 s watchdog: a master that dies mid-strike leaves the arm halted part-way.
+- A slave COMM_LOST seen while the link is live again (this process stalled > 1 s) is auto-reset the
+  same way as at connect. A bug inside the master's step() latches ACTUATOR_INTERNAL instead of
+  stopping the thread, and READY needs a status read within the last 500 ms.
+- On quit, tools/inspect_test.py stops taking new strikes and waits (up to the DONE timeout) for a
+  running cycle to finish before it closes the port. The arm's thread starts only after the camera.
 
 **Homing:** no limit switch — the stick's power-on position is home; the firmware counts steps
 and always returns the same number. (A limit switch is a possible later upgrade.)
@@ -226,6 +238,7 @@ and always returns the same number. (A limit switch is a possible later upgrade.
 | DEPTH_UNRELIABLE | valid-depth ratio on plate too low | depth rules skipped, flagged on HMI (degraded mode) |
 | ACTUATOR_COMM_LOST | Modbus errors / slave heartbeat stale | FAULT, NG parts not rejected, retry connect |
 | ACTUATOR_TIMEOUT | BUSY or DONE not seen in time | FAULT, needs reset |
+| ACTUATOR NOT_HOME | arm restarted while away from home (EEPROM flag) | FAULT, operator puts the stick home by hand, presses R |
 | REJECT_FAILED | VERIFY sees the part still on the plate | FAULT, needs operator |
 | OPERATOR_IN_CELL | hand blob from border | PAUSED (not a fault) |
 
@@ -236,7 +249,7 @@ Each fault has a code, a human message on the HMI, and a log line with timestamp
 Live image with: part outline + measured mm, OK/NG banner with reason codes, anomaly heatmap
 overlay on NG, cell state, handshake lamps (READY/REQ/BUSY/DONE/FAULT), heartbeat indicator,
 OK/NG counters, cycle time, last 5 log lines. Keys: L re-lock exposure, C recalibrate,
-R reset fault, H toggle heatmap, Q quit.
+X reset fault, R stick home (after NOT_HOME), H toggle heatmap, Q quit.
 
 ## 10. Datasets, training, evaluation
 
@@ -252,7 +265,9 @@ Photos are captured per session (`capture.py --session sessionN`, good and defec
 Training: anomalib PatchCore (wide_resnet50_2, layers 2+3) on aligned crops, export to ONNX,
 runtime uses ONNX Runtime (CUDA, CPU fallback). Threshold: midpoint between the highest val-good and
 lowest val-defect score; if they overlap, the value that rejects all val defects, and the overlap is
-reported. `evaluate.py` prints the confusion matrix and per-defect-type scores and saves a heatmap
+reported. If val has no surface defects (or no good bricks), the side that exists sets the bound and
+anomalib's 0.5 fills in for the other; training prints a WARNING and meta.json records
+`threshold_basis`. NaN/inf scores stop training. `evaluate.py` prints the confusion matrix and per-defect-type scores and saves a heatmap
 sheet; those numbers go into the README unedited.
 
 ## 11. Testing
