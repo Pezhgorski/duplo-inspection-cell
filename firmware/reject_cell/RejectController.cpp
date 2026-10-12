@@ -1,5 +1,16 @@
 #include "RejectController.h"
 
+#include <math.h>
+
+uint32_t RejectController::strokeTimeoutMs(long steps, float speed, float accel) {
+  const float s = (float)(steps < 0 ? -steps : steps);
+  if (speed < 1) speed = 1;  // a zero register must not divide by zero
+  if (accel < 1) accel = 1;
+  const float ramp = speed * speed / accel;  // steps spent speeding up and slowing down from full speed
+  const float t = s >= ramp ? s / speed + speed / accel : 2 * sqrtf(s / accel);
+  return (uint32_t)(STROKE_SLACK * t * 1000.0f) + STROKE_MARGIN_MS;
+}
+
 void RejectController::begin(uint32_t now) {
   for (bool& c : regs_.coils) c = false;
   regs_.holding[reg::MASTER_HEARTBEAT] = 0;
@@ -60,7 +71,7 @@ void RejectController::update(uint32_t now) {
         } else {
           state_ = IDLE;
         }
-      } else if (now - strokeStart_ > MOVE_TIMEOUT_MS) {
+      } else if (now - strokeStart_ > moveTimeoutMs_) {
         fault(FAULT_MOVE_TIMEOUT);
       }
       break;
@@ -85,6 +96,8 @@ void RejectController::update(uint32_t now) {
 }
 
 void RejectController::startStroke(long target, State next, uint32_t now) {
+  moveTimeoutMs_ = strokeTimeoutMs(target - arm_.position(), regs_.holding[reg::MAX_SPEED],
+                                   regs_.holding[reg::ACCELERATION]);
   arm_.moveTo(target);
   strokeStart_ = now;
   state_ = next;

@@ -17,7 +17,7 @@ import pytest
 
 from cell.actuator import (COIL_REQ_REJECT, DI_BUSY, DI_DONE, DI_FAULT, DI_READY, HR_ACCELERATION,
                            HR_MASTER_HEARTBEAT, HR_MAX_SPEED, HR_STRIKE_STEPS, IR_CYCLE_COUNT,
-                           IR_FAULT_CODE, IR_SLAVE_HEARTBEAT, ActuatorMaster, Phase, Status)
+                           IR_FAULT_CODE, IR_SLAVE_HEARTBEAT, ActuatorMaster, Phase, Status, move_timeout)
 from sim import SimClock, run
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +91,8 @@ def lib(tmp_path_factory):
             "sim_set_holding": 2, "sim_input": 1, "sim_set_stalled": 1}.get(name, 0)
     for name in ("sim_position", "sim_max_position", "sim_min_position"):
         getattr(lib, name).restype = ctypes.c_long
+    lib.sim_stroke_timeout_ms.argtypes = [ctypes.c_int] * 3
+    lib.sim_stroke_timeout_ms.restype = ctypes.c_uint32
     return lib
 
 
@@ -230,3 +232,10 @@ def test_restarted_master_clears_the_watchdog_fault(slave, clock):
     assert second.fault == ""
     assert slave.input(IR_CYCLE_COUNT) == 0  # no strike on reconnect
     assert reject(second, slave, clock).state == "done"
+
+
+@pytest.mark.parametrize("steps, speed, accel", [(800, 2400, 12000), (-600, 1200, 12000),
+                                                 (800, 300, 12000), (100, 4000, 2000)])
+def test_master_and_slave_agree_on_the_stroke_timeout(lib, steps, speed, accel):
+    assert lib.sim_stroke_timeout_ms(steps, speed, accel) == pytest.approx(
+        move_timeout(steps, speed, accel) * 1000, abs=2)

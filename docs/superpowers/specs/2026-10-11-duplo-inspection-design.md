@@ -96,13 +96,13 @@ app.py            entry point
 train/train.py    anomalib PatchCore training on train split, threshold from val split, ONNX export
 train/evaluate.py one-shot report on the test split (confusion matrix, per-defect scores, heatmap sheet)
 tools/            capture.py, camera_check.py (exist)
-firmware/reject_arm/reject_arm.ino
+firmware/reject_cell/   reject_cell.ino + RejectController (Arduino-free, unit-tested on the PC)
 tests/            pytest suite (§11)
 ```
 
 Each `cell/` module has one job and can be tested without the camera or Arduino:
 `locate/measure/rules/anomaly` take arrays and return values; `actuator` hides Modbus behind
-`request_reject()` / `poll()`; `cell.py` only sees those interfaces.
+`request_reject()` / `step()` (run by `ActuatorThread`); `cell.py` only sees those interfaces.
 
 ## 4. Inspection pipeline
 
@@ -193,8 +193,11 @@ plain USB serial, no RS-485 hardware needed).
 **Reject sequence (4-way handshake):** master checks READY → sets REQ_REJECT → slave sets BUSY,
 sweeps, returns, clears BUSY, sets DONE → master clears REQ_REJECT → slave clears DONE.
 
-**Timeouts (master):** BUSY within 300 ms of REQ, DONE within 3 s, slave heartbeat change within
-500 ms. **Watchdog (slave):** master heartbeat unchanged for 1 s → stop motor, FAULT_CODE=1.
+**Timeouts (master):** BUSY within 300 ms of REQ; DONE within 2 × the slave's stroke timeout + 0.5 s
+(3.1 s at the defaults); slave heartbeat change within 500 ms. **Slave:** each stroke must finish within
+1.5 × its ideal time for the set steps, speed and acceleration + 0.5 s (1.3 s at the defaults) →
+stop motor, FAULT_CODE=2; master heartbeat unchanged for 1 s → stop motor, FAULT_CODE=1. The master
+refuses strike settings outside |steps| 1..32767, speed 1..4000 steps/s, acceleration 1..65535.
 
 **Implementation:** `firmware/reject_cell` (slave; logic in `RejectController`, no Arduino
 dependencies) and `cell/actuator.py` (master, non-blocking `step()` run by a background thread
@@ -209,8 +212,8 @@ every 50 ms). Details settled while building it:
   CYCLE_COUNT must rise by exactly one per handshake (ACTUATOR_COUNT_MISMATCH otherwise).
 - ModbusRTUSlave holds the Mega's loop for ~4-5 ms per request, during which no steps are taken;
   polling every 50 ms keeps that to a slightly slower strike, with exact positions.
-- A full-speed strike (~0.7 s) is shorter than the 1 s watchdog, so a master crash mid-strike
-  usually lets the strike finish; the watchdog guards slower moves and an idle arm.
+- A full strike at the defaults takes ~1.1-1.3 s on the real stepper (ramps plus the Modbus pauses),
+  longer than the 1 s watchdog: a master that dies mid-strike leaves the arm halted part-way.
 
 **Homing:** no limit switch — the stick's power-on position is home; the firmware counts steps
 and always returns the same number. (A limit switch is a possible later upgrade.)

@@ -31,7 +31,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from capture import (AUTO_SETTLE_FRAMES, CameraSettings, color_sensor,  # noqa: E402
                      reset_depth_sensor, start_pipeline)
-from cell.actuator import COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus  # noqa: E402
+from cell.actuator import (COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus,  # noqa: E402
+                           check_strike)
 from cell.anomaly import AnomalyModel, roi_score  # noqa: E402
 from cell.geometry import aligned_crop, find_part, load_plate, part_box, plate_pixels  # noqa: E402
 from cell.reject import RejectTrigger  # noqa: E402
@@ -112,6 +113,10 @@ def main() -> int:
     actuator = None
     if not args.no_motor:
         steps = -args.strike_steps if args.reverse else args.strike_steps
+        try:
+            check_strike(steps, args.speed, args.accel)
+        except ValueError as exc:
+            parser.error(str(exc))
         master = ActuatorMaster(ModbusBus.serial(args.port), strike_steps=steps, speed=args.speed, accel=args.accel)
         actuator = ActuatorThread(master).start()
     trigger, auto_reject = RejectTrigger(), actuator is not None

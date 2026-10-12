@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from cell.actuator import (BUSY_TIMEOUT, COIL_REQ_REJECT, COIL_RESET_FAULT, DONE_TIMEOUT,
+from cell.actuator import (BUSY_TIMEOUT, COIL_REQ_REJECT, COIL_RESET_FAULT,
                            HR_MASTER_HEARTBEAT, HR_STRIKE_STEPS, ActuatorMaster, ActuatorThread,
-                           BusError, Phase, Status)
+                           BusError, Phase, Status, move_timeout, stroke_time)
 from sim import SimClock, run
 
 
@@ -214,7 +214,7 @@ def test_no_done_times_out(master, slave, clock):
     job = reject(master, clock, seconds=5.0)
     assert job.state == "failed"
     assert "DONE" in master.fault
-    assert clock() - 100.3 == pytest.approx(DONE_TIMEOUT + 0.05, abs=0.06)
+    assert clock() - 100.3 == pytest.approx(master.done_timeout + 0.05, abs=0.06)
 
 
 def test_done_never_cleared_times_out(master, slave, clock):
@@ -326,3 +326,30 @@ def test_thread_runs_the_handshake_in_real_time():
         assert "idle" in actuator.describe()
     finally:
         actuator.stop()
+
+
+def test_stroke_time_trapezoid_and_triangle():
+    assert stroke_time(800, 2400, 12000) == pytest.approx(800 / 2400 + 2400 / 12000)
+    assert stroke_time(100, 2400, 12000) == pytest.approx(2 * (100 / 12000) ** 0.5)  # never at full speed
+    assert stroke_time(-800, 2400, 12000) == stroke_time(800, 2400, 12000)
+
+
+def test_done_timeout_follows_the_strike_settings(clock, slave):
+    fast = ActuatorMaster(slave, clock=clock)
+    slow = ActuatorMaster(slave, speed=600, clock=clock)
+    assert fast.done_timeout == pytest.approx(2 * move_timeout(800, 2400, 12000) + 0.5)
+    assert slow.done_timeout > fast.done_timeout
+
+
+def test_slow_strike_is_not_a_timeout(clock, slave):
+    slave.strike_time = 3.3  # 600 steps/s on the real stepper, ramps and Modbus pauses included
+    m = ActuatorMaster(slave, speed=600, clock=clock)
+    run(m, clock, 0.3)
+    assert reject(m, clock, seconds=8.0).state == "done", m.fault
+
+
+@pytest.mark.parametrize("kwargs", [dict(strike_steps=40000), dict(strike_steps=0), dict(speed=0),
+                                    dict(speed=5000), dict(accel=0), dict(accel=70000)])
+def test_rejects_out_of_range_strike_settings(clock, slave, kwargs):
+    with pytest.raises(ValueError):
+        ActuatorMaster(slave, clock=clock, **kwargs)

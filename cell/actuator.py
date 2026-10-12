@@ -7,8 +7,10 @@ Reject handshake (design spec §7):
 `ActuatorMaster.step()` never blocks on the handshake: it does one round of bus I/O and moves the
 handshake on, so the tests drive it on a simulated clock and `ActuatorThread` runs it beside the
 camera loop. The master writes its heartbeat every 100 ms; the slave stops the motor if it goes
-quiet for 1 s, and the master faults if the slave's heartbeat stops changing for 500 ms.
+quiet for 1 s, and the master faults if the slave's heartbeat stops changing for 500 ms. Stroke and DONE timeouts follow the
+strike settings (move_timeout()).
 """
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -28,8 +30,35 @@ SLAVE_FAULTS = {0: "NONE", 1: "COMM_LOST", 2: "MOVE_TIMEOUT"}
 HEARTBEAT_PERIOD = 0.1    # s, master heartbeat
 HEARTBEAT_TIMEOUT = 0.5   # s, slave heartbeat must change within this
 BUSY_TIMEOUT = 0.3        # s, from REQ_REJECT to BUSY
-DONE_TIMEOUT = 3.0        # s, from REQ_REJECT to DONE
 RELEASE_TIMEOUT = 0.5     # s, from dropping REQ_REJECT to DONE clearing
+STROKE_SLACK = 1.5        # must match RejectController::STROKE_SLACK
+STROKE_MARGIN = 0.5       # s, must match RejectController::STROKE_MARGIN_MS
+DONE_MARGIN = 0.5         # s the master waits beyond the slave's own two stroke timeouts
+MAX_STEP_RATE = 4000      # steps/s: about what AccelStepper can step on a 16 MHz Mega
+
+
+def stroke_time(steps: int, speed: float, accel: float) -> float:
+    """Seconds for one stroke of |steps| at `speed` steps/s, ramping at `accel` steps/s^2."""
+    steps = abs(steps)
+    ramp = speed * speed / accel  # steps spent speeding up and slowing down from full speed
+    if steps >= ramp:
+        return steps / speed + speed / accel
+    return 2 * math.sqrt(steps / accel)  # never reaches full speed
+
+
+def move_timeout(steps: int, speed: float, accel: float) -> float:
+    """The slave's timeout for one stroke (RejectController::strokeTimeoutMs), in seconds."""
+    return STROKE_SLACK * stroke_time(steps, speed, accel) + STROKE_MARGIN
+
+
+def check_strike(strike_steps: int, speed: int, accel: int):
+    """Raises ValueError for settings the 16-bit registers or the Mega cannot carry."""
+    if not 1 <= abs(strike_steps) <= 0x7FFF:
+        raise ValueError(f"strike steps {strike_steps}: must be 1..32767 either way")
+    if not 1 <= speed <= MAX_STEP_RATE:
+        raise ValueError(f"speed {speed}: must be 1..{MAX_STEP_RATE} steps/s")
+    if not 1 <= accel <= 0xFFFF:
+        raise ValueError(f"acceleration {accel}: must be 1..65535 steps/s^2")
 
 
 class BusError(Exception):
@@ -113,6 +142,8 @@ class RejectJob:
 class ActuatorMaster:
     def __init__(self, bus, strike_steps: int = 800, speed: int = 2400, accel: int = 12000,
                  clock=time.monotonic):
+        check_strike(strike_steps, speed, accel)
+        self.done_timeout = 2 * move_timeout(strike_steps, speed, accel) + DONE_MARGIN
         self.bus = bus
         self.config = [strike_steps, speed, accel]
         self.clock = clock
@@ -211,8 +242,8 @@ class ActuatorMaster:
             if s.done:
                 self._enter(Phase.WAIT_RELEASE, now)
                 self.bus.write_coil(COIL_REQ_REJECT, False)
-            elif now - self._request_at > DONE_TIMEOUT:
-                self._latch(f"ACTUATOR_TIMEOUT: no DONE within {DONE_TIMEOUT} s", now)
+            elif now - self._request_at > self.done_timeout:
+                self._latch(f"ACTUATOR_TIMEOUT: no DONE within {self.done_timeout:.1f} s", now)
         elif self.phase is Phase.WAIT_RELEASE:
             if s.done and now - self._phase_at <= RELEASE_TIMEOUT:
                 self.bus.write_coil(COIL_REQ_REJECT, False)  # repeat, in case the first was lost

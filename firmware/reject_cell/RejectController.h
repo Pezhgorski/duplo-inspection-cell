@@ -46,7 +46,11 @@ class RejectController {
  public:
   static const uint32_t HEARTBEAT_MS = 100;      // slave heartbeat period
   static const uint32_t WATCHDOG_MS = 1000;      // master heartbeat must change within this
-  static const uint32_t MOVE_TIMEOUT_MS = 2500;  // per stroke (out, back, or return after a reset)
+  // stroke timeout = ideal stroke time (trapezoidal speed profile) x STROKE_SLACK + STROKE_MARGIN_MS;
+  // the slack covers the ~25 % of loop() the Modbus requests take. cell/actuator.py mirrors this.
+  static constexpr float STROKE_SLACK = 1.5f;
+  static const uint32_t STROKE_MARGIN_MS = 500;
+  static uint32_t strokeTimeoutMs(long steps, float speed, float accel);
 
   // defaults until the master writes its own; 3200 steps/rev, so 800 = a quarter turn
   static const int16_t DEFAULT_STRIKE_STEPS = 800;
@@ -76,6 +80,7 @@ class RejectController {
   long home_ = 0;
   long strikeTarget_ = 0;
   uint32_t strokeStart_ = 0;
+  uint32_t moveTimeoutMs_ = 0;
   uint32_t lastBeat_ = 0;
   uint16_t lastMasterBeat_ = 0;
   uint32_t masterBeatAt_ = 0;
