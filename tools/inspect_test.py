@@ -40,6 +40,7 @@ SEARCH_MESSAGES = {
     "empty": "NO PART in the plate box",
     "outside": "PART NOT FULLY INSIDE the plate box",
     "multiple": "MORE THAN ONE PART in the plate box",
+    "too_large": "SOMETHING TOO BIG in the plate box (hand?)",
 }
 
 

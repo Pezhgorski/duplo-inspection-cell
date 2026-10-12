@@ -3,7 +3,8 @@
 Split (seeded): every 4th located good brick -> val, the rest -> train; all defects -> val.
 The model learns from good bricks only. The OK/NG threshold is chosen on val:
 - midpoint between the highest good score and the lowest defect score, if they separate;
-- otherwise the value that still rejects every defect, and the overlap is reported.
+- otherwise the value that still rejects every defect, and the overlap is reported;
+- if val has no good bricks or no surface defects, see cell/threshold.py.
 Only defects that pass the size rule count for the threshold - wrong shapes are the rule's job.
 
 Usage:  python train/train_model.py [--session session1]
@@ -28,6 +29,7 @@ from lightning.pytorch import seed_everything  # noqa: E402
 from cell.anomaly import AnomalyModel, roi_score  # noqa: E402
 from cell.geometry import CROP_SIZE, aligned_crop, find_part, load_plate, part_box  # noqa: E402
 from cell.rules import check_size, size_reference  # noqa: E402
+from cell.threshold import choose_threshold  # noqa: E402
 
 MODELS = ROOT / "models"
 CROPS = MODELS / "crops"
@@ -74,13 +76,6 @@ def train() -> Path:
     return model.to_torch(MODELS)
 
 
-def choose_threshold(good: list[float], defect: list[float]) -> tuple[float, bool]:
-    """Returns (threshold, separable)."""
-    if max(good) < min(defect):
-        return (max(good) + min(defect)) / 2, True
-    return min(defect) - 1e-4, False
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="session1")
@@ -102,7 +97,7 @@ def main():
 
     good = [r["score"] for r in results if r["label"] == "good"]
     surface = [r["score"] for r in results if r["label"] == "defect" and not r["size"]]
-    threshold, separable = choose_threshold(good, surface)
+    threshold, basis = choose_threshold(good, surface)
 
     for r in sorted(results, key=lambda r: r["score"]):
         verdict = "NG" if r["size"] or r["score"] > threshold else "OK"
@@ -111,13 +106,15 @@ def main():
         print(f"{r['score']:.3f}  {r['label']:6} {r['name']}  {verdict} {' '.join(r['size'])}{mark}")
     false_rejects = sum(r["label"] == "good" and r["verdict"] == "NG" for r in results)
     missed = sum(r["label"] == "defect" and r["verdict"] == "OK" for r in results)
-    print(f"\nthreshold {threshold:.3f} ({'separable' if separable else 'OVERLAP: set to reject every defect'})")
+    note = {"overlap": "OVERLAP: set to reject every defect"}.get(basis, basis)
+    print(f"\nthreshold {threshold:.3f} ({note})")
     print(f"val: {len(good)} good, {len(results) - len(good)} defect -> "
           f"{false_rejects} good falsely rejected, {missed} defects missed")
 
     meta = {
         "model": str(model_path.relative_to(ROOT)), "session": session.name, "seed": SEED,
-        "crop_size": CROP_SIZE, "threshold": threshold, "separable": separable,
+        "crop_size": CROP_SIZE, "threshold": threshold, "separable": basis == "separable",
+        "threshold_basis": basis,
         "size_reference": ref, "val": results,
     }
     (MODELS / "meta.json").write_text(json.dumps(meta, indent=2))
