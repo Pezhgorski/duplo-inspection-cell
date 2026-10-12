@@ -3,11 +3,12 @@
 Usage:  python tools/inspect_test.py [--port COM4] [--strike-steps 800] [--reverse] [--no-motor]
 
 Keys:
-  R      real-time mode on/off: inspect every frame (starts on)
+  T      real-time mode on/off: inspect every frame (starts on)
   A      auto-reject on/off: in real-time mode a settled NG part is struck once, then the
          camera verifies it moved (starts on when the arm is connected)
   SPACE  inspect once and freeze the result (turns real-time off)
   K      strike now (manual), through the same Modbus handshake
+  R      the stick is back home: only asked for after the arm restarted mid-strike (NOT_HOME)
   X      reset an arm fault
   L      re-lock camera exposure / white balance
   Q/ESC  quit
@@ -164,14 +165,14 @@ def main() -> int:
                 bad = actuator is not None and i == 0 and actuator.master.fault
                 cv2.putText(view, line, (12, 60 + 26 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             RED if bad else WHITE, 2 if bad else 1, cv2.LINE_AA)
-            cv2.putText(view, "R real-time | A auto | SPACE snapshot | K strike | X reset | L re-lock | Q quit",
+            cv2.putText(view, "T real-time | A auto | SPACE snapshot | K strike | R stick home | X reset | L re-lock | Q quit",
                         (12, 700), cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
             cv2.imshow(WINDOW, np.hstack([view, result_panel(result)]))
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-            if key == ord("r"):
+            if key == ord("t"):
                 realtime = not realtime
             elif key == ord(" ") and relock_at is None:
                 realtime = False
@@ -188,6 +189,9 @@ def main() -> int:
             elif key == ord("x") and actuator is not None:
                 actuator.reset()
                 status = "arm reset requested"
+            elif key == ord("r") and actuator is not None:
+                actuator.confirm_home()
+                status = "stick home confirmed"
             elif key == ord("l"):
                 settings.set_auto()
                 relock_at, status = frames_seen + AUTO_SETTLE_FRAMES, "re-metering camera..."

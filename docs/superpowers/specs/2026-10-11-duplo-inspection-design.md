@@ -150,7 +150,7 @@ IDLE ──part appears──► SETTLING ──stable N frames──► INSPECT
                                                          └──► NG ──► REJECTING ──DONE──► VERIFY
 VERIFY: part moved (see §1a) → wait for removal → IDLE;  part unmoved → FAULT(REJECT_FAILED)
 any state ──operator hand in view──► PAUSED ──view clear──► IDLE
-any state ──diagnostic/actuator fault──► FAULT ──R key (reset) and condition cleared──► IDLE
+any state ──diagnostic/actuator fault──► FAULT ──X key (reset; R = "stick is home" for NOT_HOME) and condition cleared──► IDLE
 ```
 
 - **Settling:** part center moves < 2 px over 5 consecutive frames.
@@ -187,7 +187,7 @@ plain USB serial, no RS-485 hardware needed).
 | Holding reg | 2 | MAX_SPEED | master → slave | steps/s (default 2400) |
 | Holding reg | 3 | ACCELERATION | master → slave | steps/s² (default 12000) |
 | Input reg | 0 | SLAVE_HEARTBEAT | slave → master | incremented every 100 ms |
-| Input reg | 1 | FAULT_CODE | slave → master | 0 none, 1 comm lost, 2 move timeout |
+| Input reg | 1 | FAULT_CODE | slave → master | 0 none, 1 comm lost, 2 move timeout, 3 not home |
 | Input reg | 2 | CYCLE_COUNT | slave → master | completed rejects |
 
 **Reject sequence (4-way handshake):** master checks READY → sets REQ_REJECT → slave sets BUSY,
@@ -206,8 +206,12 @@ every 50 ms). Details settled while building it:
   stale request (e.g. raised during a fault) never strikes twice. RESET_FAULT acts on its rising edge.
 - After a reset the slave drives the arm home first (READY only once home).
 - On connect the master clears REQ_REJECT, writes the strike parameters and auto-resets a
-  COMM_LOST fault (the expected leftover of a previous master session), retrying until the slave
-  has seen the new heartbeat. Any other slave fault is latched for the operator.
+  COMM_LOST fault, retrying until the slave has seen the new heartbeat. Any other slave fault is
+  latched for the operator. (Opening the port resets the Mega, so a leftover COMM_LOST is rare.)
+- Home is the power-on position, so the firmware keeps an EEPROM flag "away from home", set when a
+  stroke leaves home and cleared on arrival. Booting with it set gives FAULT_CODE=3 NOT_HOME: no
+  strike until the operator has put the stick home and pressed R (X does not clear it). Only a
+  restart while away asks for R; normal start-ups and strikes do not.
 - BUSY may be missed when a strike finishes between two polls; DONE is accepted in its place.
   CYCLE_COUNT must rise by exactly one per handshake (ACTUATOR_COUNT_MISMATCH otherwise).
 - ModbusRTUSlave holds the Mega's loop for ~4-5 ms per request, during which no steps are taken;
@@ -229,6 +233,7 @@ and always returns the same number. (A limit switch is a possible later upgrade.
 | DEPTH_UNRELIABLE | valid-depth ratio on plate too low | depth rules skipped, flagged on HMI (degraded mode) |
 | ACTUATOR_COMM_LOST | Modbus errors / slave heartbeat stale | FAULT, NG parts not rejected, retry connect |
 | ACTUATOR_TIMEOUT | BUSY or DONE not seen in time | FAULT, needs reset |
+| ACTUATOR NOT_HOME | arm restarted while away from home (EEPROM flag) | FAULT, operator puts the stick home by hand, presses R |
 | REJECT_FAILED | VERIFY sees the part still on the plate | FAULT, needs operator |
 | OPERATOR_IN_CELL | hand blob from border | PAUSED (not a fault) |
 

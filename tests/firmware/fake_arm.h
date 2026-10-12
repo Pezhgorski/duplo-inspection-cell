@@ -30,6 +30,12 @@ class FakeArm : public Actuator {
     if (pos_ == target_) credit_ = 0;
   }
 
+  // the Mega restarts: AccelStepper counts from 0 again, wherever the stick physically is
+  void reboot() {
+    pos_ = target_ = 0;
+    credit_ = 0;
+  }
+
   long target() const { return target_; }
 
   float speed = 1000;
@@ -45,11 +51,23 @@ class FakeArm : public Actuator {
   float credit_ = 0;
 };
 
+// The EEPROM flag, in memory; counts real writes (EEPROM.update skips unchanged values)
+struct FakePersist : public Persist {
+  bool away = false;
+  int writes = 0;
+  bool awayFromHome() override { return away; }
+  void setAwayFromHome(bool v) override {
+    if (v != away) writes++;
+    away = v;
+  }
+};
+
 // Controller + registers + arm on a simulated millisecond clock, with the master's heartbeat.
 struct Rig {
   Registers regs{};
   FakeArm arm;
-  RejectController ctrl{regs, arm};
+  FakePersist persist;
+  RejectController ctrl{regs, arm, persist};
   uint32_t now;
   bool masterBeating = true;
 

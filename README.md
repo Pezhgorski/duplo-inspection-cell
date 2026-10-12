@@ -26,7 +26,7 @@ Write-up in Bulgarian; design spec and findings in English.*
 |---|---|
 | `cell/` | намиране и изправяне на детайла (`geometry.py`), правило за размер (`rules.py`), PatchCore инференция (`anomaly.py`), Modbus RTU master с handshake и watchdog (`actuator.py`), кога да се удари и проверка с камерата, че ударът е успял (`reject.py`) |
 | `tools/capture.py` | заснемане на набор данни: заключване на експозиция/баланс на бялото, зона за инспекция (`-`/`+`, стрелки) |
-| `tools/inspect_test.py` | инспекция на живо: `R` реално време, `A` автоматичен удар на NG, `SPACE` единична снимка, `K` ръчен удар, `X` нулиране на грешка |
+| `tools/inspect_test.py` | инспекция на живо: `T` реално време, `A` автоматичен удар на NG, `SPACE` единична снимка, `K` ръчен удар, `R` пръчката е върната в начална позиция (само след рестарт по време на удар), `X` нулиране на грешка |
 | `tools/camera_check.py` | проверка на камерата: USB връзка, цвят + дълбочина |
 | `train/train_model.py` | обучение, избор на праг върху валидационен набор, `models/meta.json` |
 | `train/result_images.py` | изображенията с резултати в `docs/images` |
@@ -56,6 +56,11 @@ python -m venv .venv
 `arduino-cli upload -p COM4 --fqbn arduino:avr:mega firmware/reject_cell`
 (библиотеки: `arduino-cli lib install AccelStepper ModbusRTUSlave`). Свързване: PUL+ → D2,
 DIR+ → D3, PUL− и DIR− → GND.
+
+Ако Arduino се рестартира, докато пръчката е навън (срив по време на удар, прекъснат USB),
+рамото съобщава `NOT_HOME` и не приема удари: върнете пръчката в началната позиция на ръка
+(ако драйверът я държи, изключете захранването му за момент) и натиснете `R`. При нормален
+старт и нормални удари `R` не е нужно.
 
 Тестове (без камера и Arduino; C++ частта се компилира с g++/clang++ или с MSVC от Visual Studio Build Tools, който се намира автоматично; пропуска се само ако няма компилатор):
 

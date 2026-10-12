@@ -271,6 +271,47 @@ static void test_slow_strike_is_not_a_move_timeout() {
   CHECK(rig.cycles() == 1);
 }
 
+static void test_strike_marks_the_arm_away_until_home() {
+  Rig rig;
+  rig.run(100);
+  rig.setRequest(true);
+  rig.run(50);
+  CHECK(rig.persist.away);           // out on a stroke: a reboot now would lose home
+  runUntilDone(rig);
+  CHECK(!rig.persist.away);          // back home
+  CHECK(rig.persist.writes == 2);    // one EEPROM write each way, not one per loop
+}
+
+static void test_fault_mid_strike_keeps_the_arm_marked_away() {
+  Rig rig;
+  slowStrike(rig);
+  rig.run(100);
+  rig.setRequest(true);
+  rig.run(150);
+  rig.masterBeating = false;
+  rig.run(1100);
+  CHECK(rig.faulted());
+  CHECK(rig.persist.away);
+}
+
+static void test_boot_away_from_home_faults_until_reset() {
+  Rig rig;
+  rig.persist.away = true;           // the Mega restarted while the stick was out
+  rig.arm.reboot();
+  rig.ctrl.begin(rig.now);
+  rig.run(200);
+  CHECK(rig.faulted());
+  CHECK(rig.faultCode() == FAULT_NOT_HOME);
+  rig.setRequest(true);
+  rig.run(100);
+  CHECK(rig.arm.maxPos == 0);        // no strike from an unknown position
+  rig.setRequest(false);
+  rig.setReset(true);                // the operator has put the stick home by hand
+  rig.run(1);
+  CHECK(rig.ready());
+  CHECK(!rig.persist.away);
+}
+
 int main() {
   struct { const char* name; void (*fn)(); } tests[] = {
       {"not_ready_until_master_heartbeat", test_not_ready_until_master_heartbeat},
@@ -290,6 +331,9 @@ int main() {
       {"survives_millis_wraparound", test_survives_millis_wraparound},
       {"stroke_timeout_follows_the_settings", test_stroke_timeout_follows_the_settings},
       {"slow_strike_is_not_a_move_timeout", test_slow_strike_is_not_a_move_timeout},
+      {"strike_marks_the_arm_away_until_home", test_strike_marks_the_arm_away_until_home},
+      {"fault_mid_strike_keeps_the_arm_marked_away", test_fault_mid_strike_keeps_the_arm_marked_away},
+      {"boot_away_from_home_faults_until_reset", test_boot_away_from_home_faults_until_reset},
   };
   for (auto& t : tests) {
     current = t.name;

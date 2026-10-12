@@ -85,7 +85,7 @@ def lib(tmp_path_factory):
     lib.sim_new.restype = ctypes.c_void_p
     for name in ("sim_free", "sim_advance", "sim_update", "sim_coil", "sim_set_coil", "sim_discrete",
                  "sim_holding", "sim_set_holding", "sim_input", "sim_position", "sim_max_position",
-                 "sim_min_position", "sim_set_stalled", "sim_state"):
+                 "sim_min_position", "sim_set_stalled", "sim_state", "sim_reboot", "sim_away"):
         getattr(lib, name).argtypes = [ctypes.c_void_p] + [ctypes.c_int] * {
             "sim_advance": 1, "sim_coil": 1, "sim_set_coil": 2, "sim_discrete": 1, "sim_holding": 1,
             "sim_set_holding": 2, "sim_input": 1, "sim_set_stalled": 1}.get(name, 0)
@@ -239,3 +239,32 @@ def test_restarted_master_clears_the_watchdog_fault(slave, clock):
 def test_master_and_slave_agree_on_the_stroke_timeout(lib, steps, speed, accel):
     assert lib.sim_stroke_timeout_ms(steps, speed, accel) == pytest.approx(
         move_timeout(steps, speed, accel) * 1000, abs=2)
+
+
+def test_reboot_away_from_home_is_latched_for_the_operator(slave, clock):
+    m = connect(slave, clock, speed=400)  # 800 steps out take 2 s
+    job = m.request_reject()
+    run(m, clock, 0.5, slave_advance=slave.advance)
+    assert slave.position() > 0 and slave.away()
+    slave.reboot()  # USB brown-out, or pymodbus reopening the port
+    run(m, clock, 0.3, slave_advance=slave.advance)
+    assert job.state == "failed"
+    assert m.phase is Phase.FAULT and "NOT_HOME" in m.fault
+    assert m.request_reject() is None
+    m.reset()  # X is not enough: someone must say the stick is home
+    run(m, clock, 0.3, slave_advance=slave.advance)
+    assert m.phase is Phase.FAULT
+    # the operator puts the stick home by hand, then presses R
+    m.confirm_home()
+    assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
+    assert not slave.away()
+    assert reject(m, slave, clock, seconds=8.0).state == "done", m.fault
+
+
+def test_reboot_at_home_is_harmless(slave, clock):
+    m = connect(slave, clock)
+    assert reject(m, slave, clock).state == "done"
+    run(m, clock, 0.1, slave_advance=slave.advance)
+    slave.reboot()
+    assert run(m, clock, 1.0, slave_advance=slave.advance, until=lambda: m.ready)
+    assert m.fault == ""  # no R needed: the stick was home

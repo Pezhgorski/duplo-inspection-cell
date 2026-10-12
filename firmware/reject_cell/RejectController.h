@@ -22,7 +22,7 @@ enum Holding : uint8_t { MASTER_HEARTBEAT, STRIKE_STEPS, MAX_SPEED, ACCELERATION
 enum Input : uint8_t { SLAVE_HEARTBEAT, FAULT_CODE, CYCLE_COUNT, INPUT_COUNT };
 }  // namespace reg
 
-enum FaultCode : uint16_t { FAULT_NONE = 0, FAULT_COMM_LOST = 1, FAULT_MOVE_TIMEOUT = 2 };
+enum FaultCode : uint16_t { FAULT_NONE = 0, FAULT_COMM_LOST = 1, FAULT_MOVE_TIMEOUT = 2, FAULT_NOT_HOME = 3 };
 
 // The arrays ModbusRTUSlave serves; the controller reads and writes them directly.
 struct Registers {
@@ -42,6 +42,14 @@ class Actuator {
   virtual void configure(float maxSpeed, float acceleration) = 0;
 };
 
+// One flag that survives a reset (EEPROM on the Mega): the stick is away from home. Home is the
+// power-on position, so a restart while away would silently move home; the flag catches that.
+class Persist {
+ public:
+  virtual bool awayFromHome() = 0;
+  virtual void setAwayFromHome(bool away) = 0;
+};
+
 class RejectController {
  public:
   static const uint32_t HEARTBEAT_MS = 100;      // slave heartbeat period
@@ -59,9 +67,10 @@ class RejectController {
 
   enum State : uint8_t { WAIT_MASTER, IDLE, STRIKE_OUT, STRIKE_BACK, DONE, RETURNING, FAULTED };
 
-  RejectController(Registers& regs, Actuator& arm) : regs_(regs), arm_(arm) {}
+  RejectController(Registers& regs, Actuator& arm, Persist& persist)
+      : regs_(regs), arm_(arm), persist_(persist) {}
 
-  // The power-on position is home: there is no limit switch.
+  // Power-on: resets all state. The power-on position is home (no limit switch), unless the flag says the stick was away.
   void begin(uint32_t now);
   // Call every loop(), after modbus.poll().
   void update(uint32_t now);
@@ -76,6 +85,7 @@ class RejectController {
 
   Registers& regs_;
   Actuator& arm_;
+  Persist& persist_;
   State state_ = WAIT_MASTER;
   long home_ = 0;
   long strikeTarget_ = 0;

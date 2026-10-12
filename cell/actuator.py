@@ -24,8 +24,9 @@ COIL_REQ_REJECT, COIL_RESET_FAULT = 0, 1
 DI_READY, DI_BUSY, DI_DONE, DI_FAULT = 0, 1, 2, 3
 HR_MASTER_HEARTBEAT, HR_STRIKE_STEPS, HR_MAX_SPEED, HR_ACCELERATION = 0, 1, 2, 3
 IR_SLAVE_HEARTBEAT, IR_FAULT_CODE, IR_CYCLE_COUNT = 0, 1, 2
-SLAVE_FAULT_COMM_LOST = 1
-SLAVE_FAULTS = {0: "NONE", 1: "COMM_LOST", 2: "MOVE_TIMEOUT"}
+SLAVE_FAULT_COMM_LOST, SLAVE_FAULT_NOT_HOME = 1, 3
+SLAVE_FAULTS = {0: "NONE", 1: "COMM_LOST", 2: "MOVE_TIMEOUT",
+                3: "NOT_HOME (restarted mid-strike): put the stick home by hand, press R"}
 
 HEARTBEAT_PERIOD = 0.1    # s, master heartbeat
 HEARTBEAT_TIMEOUT = 0.5   # s, slave heartbeat must change within this
@@ -160,6 +161,7 @@ class ActuatorMaster:
         self._request_at = now
         self._expected_count = 0
         self._reset_requested = False
+        self._latched_code = None       # slave fault code behind a latched fault
 
     @property
     def ready(self) -> bool:
@@ -173,8 +175,13 @@ class ActuatorMaster:
         return self.job
 
     def reset(self):
-        """Operator reset of a latched fault."""
-        if self.phase is Phase.FAULT:
+        """Operator reset of a latched fault (X). NOT_HOME needs confirm_home() (R) instead."""
+        if self.phase is Phase.FAULT and self._latched_code != SLAVE_FAULT_NOT_HOME:
+            self._reset_requested = True
+
+    def confirm_home(self):
+        """Operator (R): the stick is back home by hand, after the arm restarted mid-strike."""
+        if self.phase is Phase.FAULT and self._latched_code == SLAVE_FAULT_NOT_HOME:
             self._reset_requested = True
 
     def step(self):
@@ -219,7 +226,8 @@ class ActuatorMaster:
                 self.fault = ""
                 self._enter(Phase.IDLE, now)
         elif s.fault:
-            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now)
+            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now,
+                        s.fault_code)
         elif self.phase is Phase.IDLE:
             if self.job is not None and self.job.state == "pending":
                 if not s.ready:
@@ -268,7 +276,8 @@ class ActuatorMaster:
             self._pulse_reset()
             return
         if s.fault:
-            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now)
+            self._latch(f"ACTUATOR_FAULT: arm reports {SLAVE_FAULTS.get(s.fault_code, s.fault_code)}", now,
+                        s.fault_code)
             return
         self.fault = ""
         self._enter(Phase.IDLE, now)
@@ -279,8 +288,9 @@ class ActuatorMaster:
         self.bus.write_coil(COIL_RESET_FAULT, True)
         self.bus.write_coil(COIL_RESET_FAULT, False)
 
-    def _latch(self, reason: str, now):
+    def _latch(self, reason: str, now, slave_code=None):
         self.fault = reason
+        self._latched_code = slave_code
         self._fail_job(reason)
         self._enter(Phase.FAULT, now)
         try:
@@ -324,6 +334,10 @@ class ActuatorThread:
     def reset(self):
         with self._lock:
             self.master.reset()
+
+    def confirm_home(self):
+        with self._lock:
+            self.master.confirm_home()
 
     def describe(self) -> str:
         m = self.master

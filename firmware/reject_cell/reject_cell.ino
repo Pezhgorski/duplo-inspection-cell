@@ -13,6 +13,7 @@
 // ~4-5 ms (receive + frame gap + reply), during which no steps are taken; the master polls
 // every 50 ms, so a strike runs a little slower than the set speed, but the position stays exact.
 #include <AccelStepper.h>
+#include <EEPROM.h>
 #include <ModbusRTUSlave.h>
 
 #include "RejectController.h"
@@ -39,8 +40,17 @@ class StepperArm : public Actuator {
   }
 };
 
+// Byte 0: 1 while the stick is away from home. EEPROM.update writes only on change: 2 writes per
+// strike, ~50k strikes for the cell's 100k-cycle endurance (fine for this cell).
+class EepromPersist : public Persist {
+ public:
+  bool awayFromHome() override { return EEPROM.read(0) == 1; }  // a fresh EEPROM reads 0xFF
+  void setAwayFromHome(bool away) override { EEPROM.update(0, away ? 1 : 0); }
+};
+
 StepperArm arm;
-RejectController controller(regs, arm);
+EepromPersist persist;
+RejectController controller(regs, arm, persist);
 
 void setup() {
   stepper.setMinPulseWidth(5);  // TB6600 needs >= 2.5 us pulses

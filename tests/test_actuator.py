@@ -353,3 +353,24 @@ def test_slow_strike_is_not_a_timeout(clock, slave):
 def test_rejects_out_of_range_strike_settings(clock, slave, kwargs):
     with pytest.raises(ValueError):
         ActuatorMaster(slave, clock=clock, **kwargs)
+
+
+def test_not_home_needs_confirm_home_not_reset(master, slave, clock):
+    slave.trip(3)  # the arm restarted while the stick was out
+    run(master, clock, 0.1)
+    assert "NOT_HOME" in master.fault and "press R" in master.fault
+    master.reset()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
+    master.confirm_home()
+    run(master, clock, 0.1)
+    assert slave.resets == 1
+    assert master.phase is Phase.IDLE and master.fault == ""
+
+
+def test_confirm_home_does_not_clear_other_faults(master, slave, clock):
+    slave.trip(2)
+    run(master, clock, 0.1)
+    master.confirm_home()
+    run(master, clock, 0.2)
+    assert master.phase is Phase.FAULT and slave.resets == 0
