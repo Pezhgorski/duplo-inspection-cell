@@ -154,7 +154,7 @@ any state ──diagnostic/actuator fault──► FAULT ──X key (reset; R =
 ```
 
 - **Settling:** part center moves < 2 px over 5 consecutive frames.
-- **Hand detection:** a large blob entering from the image border → PAUSED, no inspection.
+- **Hand detection:** a large blob entering from the image border → PAUSED, no inspection. In the reject trigger, a blob over MAX_AREA or one touching the box edge next to a part holds the strike and pauses VERIFY; edge clutter therefore also holds it.
 - **Verify** uses vision to confirm the physical reject actually worked — the camera checks the robot.
 
 ## 6. Defects
@@ -249,7 +249,7 @@ Each fault has a code, a human message on the HMI, and a log line with timestamp
 Live image with: part outline + measured mm, OK/NG banner with reason codes, anomaly heatmap
 overlay on NG, cell state, handshake lamps (READY/REQ/BUSY/DONE/FAULT), heartbeat indicator,
 OK/NG counters, cycle time, last 5 log lines. Keys: L re-lock exposure, C recalibrate,
-R reset fault, H toggle heatmap, Q quit.
+X reset fault, R stick home (after NOT_HOME), H toggle heatmap, Q quit.
 
 ## 10. Datasets, training, evaluation
 

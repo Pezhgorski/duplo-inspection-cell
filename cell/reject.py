@@ -4,7 +4,7 @@ ARMED    --NG on a part that has settled (SETTLE_FRAMES frames, < SETTLE_PX)--> 
 STRIKING --arm reports DONE-->  VERIFY;   --arm fails-->  FAILED
 VERIFY   --after VERIFY_FRAMES: part gone, moved > half its length or turned-->  CLEARING
          --otherwise-->  FAILED (REJECT_FAILED: the camera says the part did not move)
-any state: a hand (crowded / too_large) in the box holds the strike and pauses VERIFY
+any state: a hand (crowded / too_large / outside) in the box holds the strike and pauses VERIFY
 CLEARING / FAILED  --plate box empty for EMPTY_FRAMES frames-->  ARMED
 
 A part is struck at most once: the trigger re-arms only when the plate box is seen empty.
@@ -60,7 +60,7 @@ class RejectTrigger:
             elif self._job.state == "failed":
                 self._go("FAILED", f"REJECT NOT DONE: {self._job.error}")
         elif self.state == "VERIFY":
-            if crowded or status == "too_large":
+            if crowded or status in ("too_large", "outside"):
                 self._verify_frames = 0  # a hand hides or moves the part: judge once it has gone
                 self.message = "hand in the plate box: waiting to verify"
                 return

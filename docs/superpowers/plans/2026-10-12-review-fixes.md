@@ -1360,6 +1360,7 @@ git commit -m "Threshold: refuse NaN scores, warn on one-sided fallbacks, show 4
 - [ ] Unplug USB in the middle of a slow strike (`--speed 400`), plug it back in and restart the app: the overlay shows `ACTUATOR_FAULT: arm reports NOT_HOME ... press R`. `X` does nothing. Turn the stick home by hand and press `R`: `arm: idle`, and the next strike works.
 - [ ] A normal restart of the app with the stick at home: no `NOT_HOME`, and no key needed.
 - [ ] Unplug USB while idle: `ACTUATOR_COMM_LOST`. Plug it back in and restart: the arm connects without `X`.
-- [ ] Hold the stick during a strike: `ACTUATOR_FAULT: arm reports MOVE_TIMEOUT`. Then `X` returns it home and the next strike works.
+- [ ] Hold the stick during a strike: the stepper is open-loop, so it loses steps and no fault appears; check by eye whether the stick still comes back to the same home, and note it (`MOVE_TIMEOUT` detects a starved `loop()`, not a blocked stick).
+- [ ] Edge hand: reach into the plate box from the edge next to an NG brick — `hand in the plate box: strike held`.
 - [ ] `--reverse` strikes in the other direction.
 - [ ] Optional, a timing check: toggle a spare pin around `modbus.poll()` and measure the per-request pause with a scope or logic analyser. Expected 4–5 ms.

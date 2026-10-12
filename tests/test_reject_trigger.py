@@ -158,6 +158,15 @@ def test_hand_during_verify_is_not_a_verified_reject():
     assert t.state == "FAILED"
 
 
+def test_edge_hand_during_verify_is_not_a_verified_reject():
+    t, arm = RejectTrigger(), FakeActuator()
+    strike(t, arm, Part((300, 200)))
+    frames(t, arm, 2 * VERIFY_FRAMES, status="outside", verdict=None)  # a hand reaching in, part hidden
+    assert t.state == "VERIFY" and "hand" in t.message
+    frames(t, arm, VERIFY_FRAMES, part=Part((300, 200)))  # hand gone, the part never moved
+    assert t.state == "FAILED"
+
+
 def test_one_empty_frame_does_not_rearm():
     t, arm = RejectTrigger(), FakeActuator()
     strike(t, arm, Part((300, 200)))
