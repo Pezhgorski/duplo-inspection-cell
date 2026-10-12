@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from capture import (AUTO_SETTLE_FRAMES, CameraSettings, color_sensor,  # noqa: E402
                      reset_depth_sensor, start_pipeline)
 from cell.actuator import (COIL_REQ_REJECT, ActuatorMaster, ActuatorThread, BusError, ModbusBus,  # noqa: E402
-                           check_strike)
+                           Phase, check_strike)
 from cell.anomaly import AnomalyModel, roi_score  # noqa: E402
 from cell.geometry import aligned_crop, find_part, load_plate, part_box, plate_pixels  # noqa: E402
 from cell.reject import RejectTrigger  # noqa: E402
@@ -188,25 +188,32 @@ def main() -> int:
                 else:
                     status = "strike requested" if actuator.request_reject() else "arm not ready"
             elif key == ord("x") and actuator is not None:
-                actuator.reset()
-                status = "arm reset requested"
+                if actuator.reset():
+                    status = "arm reset requested"
+                elif actuator.master.phase is Phase.FAULT:
+                    status = "X does not clear NOT_HOME: put the stick home, press R"
+                else:
+                    status = "no fault to reset"
             elif key == ord("r") and actuator is not None:
-                actuator.confirm_home()
-                status = "stick home confirmed"
+                status = ("stick home confirmed" if actuator.confirm_home()
+                          else "R only confirms home after NOT_HOME")
             elif key == ord("l"):
                 settings.set_auto()
                 relock_at, status = frames_seen + AUTO_SETTLE_FRAMES, "re-metering camera..."
     finally:
-        pipeline.stop()
-        cv2.destroyAllWindows()
-        if actuator:
-            # let a running strike come home before the port closes and the watchdog would halt it
-            if actuator.stop(drain=actuator.master.done_timeout):
-                try:
-                    actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
-                except BusError:
-                    pass
-                actuator.master.bus.close()
+        try:
+            if actuator:
+                # the arm first, so a camera error cannot skip it: let a running strike come home
+                # before the port closes and the watchdog would halt it
+                if actuator.stop(drain=actuator.master.done_timeout):
+                    try:
+                        actuator.master.bus.write_coil(COIL_REQ_REJECT, False)  # leave no request behind
+                    except BusError:
+                        pass
+                    actuator.master.bus.close()
+        finally:
+            pipeline.stop()
+            cv2.destroyAllWindows()
     return 0
 
 
